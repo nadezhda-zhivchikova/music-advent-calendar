@@ -108,6 +108,8 @@ def get_local_now():
 
 
 def is_window_open(now: datetime) -> bool:
+    return True
+    
     """
     Открыто ли «окошко» 08:00–10:00.
     """
@@ -241,9 +243,9 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Welcome to the Advent Music Calendar 🎄🎧\n\n"
-        "Every morning between 08:00 and 10:00 "
-        "you can open ONE track with a small message from the person who chose it.\n\n"
-        "Press the button below or send /today to open today’s track (if the window is open).\n"
+        #"Every morning between 08:00 and 10:00 "
+        "You can open ONE track with a message from the person who chose it.\n\n"
+        "Press the button below or send /today to open today’s track.\n"
         "You can also tap ❤️ under a track to vote for it. At the end of December we’ll count the top 5."
     )
 
