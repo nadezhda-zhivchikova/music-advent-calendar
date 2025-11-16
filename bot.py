@@ -418,6 +418,7 @@ def main():
     application.add_handler(CommandHandler("today", today))
     application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("top5", top5))
+    application.add_handler(CommandHandler("stats", stats))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
