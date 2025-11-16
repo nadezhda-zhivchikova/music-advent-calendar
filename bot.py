@@ -31,7 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Timezone ---
-TIMEZONE = pytz.timezone("Europe/Vilnius")
+# Часовой пояс
+TIMEZONE = pytz.timezone("Asia/Tbilisi")
 
 # --- Files ---
 TRACKS_FILE = "tracks.csv"
