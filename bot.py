@@ -40,6 +40,8 @@ HISTORY_FILE = "user_history.json"
 VOTES_FILE = "votes.json"
 
 TRACKS_CACHE = None
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))  # или захардкодить: 123456789
+
 
 
 # ---------- Работа с треками ----------
@@ -210,11 +212,11 @@ def save_votes(votes: dict):
 async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработка нажатия на кнопку "❤️ I like this track".
-    Один пользователь = один голос за трек.
+    Один пользователь может поставить лайк одному треку только один раз.
     """
     query = update.callback_query
     data = query.data or ""
-    await query.answer()  # чтобы убрать "часики"
+    await query.answer()  # убираем "часики"
 
     if not data.startswith("VOTE:"):
         return
@@ -227,6 +229,7 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voters = set(entry.get("voters", []))
 
     if user_id in voters:
+        # пользователь уже голосовал за этот трек
         await query.answer("You already voted for this track 💿", show_alert=False)
         return
 
@@ -237,6 +240,7 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_votes(votes)
 
     await query.answer("Thank you for your vote! ❤️", show_alert=False)
+
 
 
 # ---------- Handlers ----------
@@ -356,6 +360,49 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "\n".join(lines)
     await update.message.reply_text(text)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Админская команда: показывает список ВСЕХ треков и количество лайков.
+    Доступна только админу (ADMIN_USER_ID).
+    """
+    user = update.effective_user
+    logger.info("User: ", user.id)
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to view stats.")
+        return
+
+    tracks = load_tracks()
+    votes = load_votes()
+
+    if not tracks:
+        await update.message.reply_text("No tracks found in tracks.csv.")
+        return
+
+    # Собираем лайки по track_id (включая 0)
+    likes_by_id = {}
+    for t in tracks:
+        track_id = t["id"]
+        likes_by_id[track_id] = int(votes.get(track_id, {}).get("likes", 0))
+
+    # сортируем по лайкам (по убыванию)
+    tracks_sorted = sorted(
+        tracks,
+        key=lambda t: likes_by_id.get(t["id"], 0),
+        reverse=True,
+    )
+
+    lines = ["📊 Advent Music – full stats:", ""]
+    for t in tracks_sorted:
+        track_id = t["id"]
+        title = t["title"]
+        artist = t["artist"]
+        likes = likes_by_id.get(track_id, 0)
+        lines.append(f"{track_id}. {title} — {artist}  ({likes} ❤️)")
+
+    text = "\n".join(lines)
+    await update.message.reply_text(text)
+
 
 
 # ---------- Main ----------
