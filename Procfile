@@ -1,1 +1,1 @@
-start: python shhh_bot.py
+start: python bot.py
