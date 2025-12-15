@@ -18,7 +18,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
+    Messager,
     CallbackQueryHandler,
     filters,
 )
@@ -423,11 +423,8 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    if text == "🔔 Подписаться":
+    if text == "Подписаться":
         return await subscribe(update, context)
-
-    if text == "🎵 Open today’s track":
-        return await today(update, context)
 
     await update.message.reply_text(
         "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄"
