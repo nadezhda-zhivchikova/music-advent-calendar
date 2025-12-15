@@ -334,6 +334,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Handlers ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("START command from chat_id=%s", update.effective_chat.id)
     text = (
         "Welcome to the Advent Music Calendar 🎄🎧\n\n"
         "You can open ONE track with a short message.\n\n"
