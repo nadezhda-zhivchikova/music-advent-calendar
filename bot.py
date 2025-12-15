@@ -29,6 +29,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+# 🔒 Не логируем HTTP-запросы с токеном
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- Timezone ---
 TIMEZONE = pytz.timezone("Asia/Tbilisi")
