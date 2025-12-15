@@ -336,15 +336,20 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Handlers ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("START command from chat_id=%s", update.effective_chat.id)
     text = (
-        "Welcome to the Advent Music Calendar 🎄🎧\n\n"
-        "You can open ONE track with a short message.\n\n"
-        "Press the button below or send /today to open today’s track.\n"
-        "You can also tap ❤️ under a track to vote for it. At the end of December we’ll count the top 5."
+        "🎄 *Advent Music Calendar*\n\n"
+        "Этот бот будет присылать вам *2–3 музыкальных трека каждый день* "
+        "с **16 по 26 декабря**.\n\n"
+        "В каждом сообщении вы получите:\n"
+        "• название трека\n"
+        "• ссылку на клип или аудио\n"
+        "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇"
     )
-    await update.message.reply_text(text, reply_markup=build_main_keyboard())
 
+    await update.message.reply_markdown(
+        text,
+        reply_markup=build_start_keyboard(),
+    )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = get_local_now()
@@ -399,11 +404,16 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+
+    if text == "🔔 Подписаться":
+        return await subscribe(update, context)
+
     if text == "🎵 Open today’s track":
         return await today(update, context)
 
-    await update.message.reply_text("Use /today or the button to open today’s track. 🎄")
-
+    await update.message.reply_text(
+        "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄"
+    )
 
 async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
