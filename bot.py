@@ -179,8 +179,7 @@ def build_main_keyboard():
 
 def build_start_keyboard():
     keyboard = [
-        [KeyboardButton("🔔 Подписаться")],
-        [KeyboardButton("🎵 Open today’s track")],
+        [KeyboardButton("Подписаться")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
