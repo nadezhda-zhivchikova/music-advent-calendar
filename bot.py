@@ -31,7 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Timezone ---
-# Часовой пояс
 TIMEZONE = pytz.timezone("Asia/Tbilisi")
 
 # --- Files ---
@@ -51,8 +50,8 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 def load_tracks():
     """
     Загружаем треки из tracks.csv (кэшируем в памяти).
-    Ожидаются поля (для /today): id, title, artist, link, from, message.
-    Для рассылки можно использовать отдельный формат, но этот бот использует текущий формат.
+    Ожидаются поля:
+      id,date,slot,title&artist,video_link,audio,message
     """
     global TRACKS_CACHE
     if TRACKS_CACHE is not None:
@@ -70,20 +69,24 @@ def load_tracks():
         for row in reader:
             if not row.get("id"):
                 continue
+
             tracks.append({
-                "id": str(row["id"]).strip(),
-                "title": row.get("title", "").strip(),
-                "artist": row.get("artist", "").strip(),
-                "link": row.get("link", "").strip(),
-                "from": row.get("from", "").strip(),
-                "message": row.get("message", "").strip(),
+                "id": str(row.get("id", "")).strip(),
+                "date": (row.get("date") or "").strip(),
+                "slot": (row.get("slot") or "").strip(),
+                # В CSV колонка называется "title&artist", в коде используем удобное имя
+                "title_artist": (row.get("title&artist") or "").strip(),
+                "video_link": (row.get("video_link") or "").strip(),
+                "audio": (row.get("audio") or "").strip(),
+                "message": (row.get("message") or "").strip(),
             })
+
     TRACKS_CACHE = tracks
     logger.info("Loaded %d tracks from %s", len(tracks), TRACKS_FILE)
     return TRACKS_CACHE
 
 
-# ---------- История треков по пользователям ----------
+# ---------- История треков по пользователям (/today) ----------
 
 def load_history():
     """
@@ -129,6 +132,8 @@ def choose_track_for_user(chat_id: int, today_date: str):
     - если уже выдавали трек сегодня -> вернуть тот же;
     - иначе выбрать случайный из тех, что ещё НЕ были у пользователя;
     - если все уже были, начать новый круг со всех треков.
+
+    Важно: используется только поле id и остальные поля трека для отображения.
     """
     tracks = load_tracks()
     if not tracks:
@@ -150,7 +155,6 @@ def choose_track_for_user(chat_id: int, today_date: str):
     available = [t for t in tracks if t["id"] not in used_ids]
 
     if not available:
-        # Все треки уже были — начинаем заново
         used_ids = set()
         available = tracks[:]
 
@@ -215,7 +219,7 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     query = update.callback_query
     data = query.data or ""
-    await query.answer()  # убираем "часики"
+    await query.answer()
 
     if not data.startswith("VOTE:"):
         return
@@ -313,10 +317,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     audio = msg.audio
     file_id = audio.file_id
-    unique_id = audio.file_unique_id  # debug
-    title = audio.title or ""
-    performer = audio.performer or ""
-    duration = audio.duration
+    unique_id = audio.file_unique_id
 
     context.user_data["awaiting_audio"] = False
 
@@ -325,8 +326,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         "✅ Audio saved.\n\n"
         f"file_id:\n{file_id}\n\n"
-        f"(debug) file_unique_id: {unique_id}\n"
-        f"Title: {title}\nPerformer: {performer}\nDuration: {duration}s\n\n"
+        f"(debug) file_unique_id: {unique_id}\n\n"
         "👉 Put this file_id into tracks.csv column `audio`."
     )
 
@@ -336,7 +336,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Welcome to the Advent Music Calendar 🎄🎧\n\n"
-        "You can open ONE track with a message from the person who chose it.\n\n"
+        "You can open ONE track with a short message.\n\n"
         "Press the button below or send /today to open today’s track.\n"
         "You can also tap ❤️ under a track to vote for it. At the end of December we’ll count the top 5."
     )
@@ -366,22 +366,24 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    title = track["title"]
-    artist = track["artist"]
-    link = track["link"]
-    from_name = track["from"]
-    message = track["message"]
-    track_id = track["id"]
+    title_artist = track.get("title_artist", "").strip() or "(no title)"
+    video_link = track.get("video_link", "").strip()
+    message = track.get("message", "").strip()
+    track_id = track.get("id", "")
 
     logger.info("Chat %s opened track %s for %s", chat_id, track_id, today_date)
+
+    # message может быть пустым — тогда не вставляем лишнюю пустую строку
+    msg_block = (message + "\n\n") if message else ""
+
+    link_block = f"🔗 [Watch / Listen here]({video_link})" if video_link else "🔗 (no link)"
 
     text = (
         f"✨ Advent Music Calendar\n\n"
         f"🎵 *Track of the day:*\n"
-        f"_{title}_ — _{artist}_\n\n"
-        f"💌 *From:* {from_name}\n\n"
-        f"{message}\n\n"
-        f"🔗 [Listen here]({link})\n\n"
+        f"_{title_artist}_\n\n"
+        f"{msg_block}"
+        f"{link_block}\n\n"
         f"If you liked this track, tap ❤️ below!"
     )
 
@@ -431,9 +433,9 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🏆 Top 5 Advent Tracks (by likes):", ""]
     for i, (likes, t) in enumerate(top, start=1):
-        lines.append(f"{i}. {t['title']} — {t['artist']}  ({likes} ❤️)")
-        if t.get("link"):
-            lines.append(f"   {t['link']}")
+        lines.append(f"{i}. {t.get('title_artist','(no title)')}  ({likes} ❤️)")
+        if t.get("video_link"):
+            lines.append(f"   {t['video_link']}")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -463,7 +465,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📊 Advent Music – full stats:", ""]
     for t in tracks_sorted:
-        lines.append(f'{t["id"]}. {t["title"]} — {t["artist"]}  ({likes_by_id.get(t["id"], 0)} ❤️)')
+        tid = t.get("id", "")
+        ta = t.get("title_artist", "(no title)")
+        likes = likes_by_id.get(tid, 0)
+        lines.append(f"{tid}. {ta}  ({likes} ❤️)")
 
     await update.message.reply_text("\n".join(lines))
 
