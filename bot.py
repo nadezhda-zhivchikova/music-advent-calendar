@@ -13,6 +13,7 @@ from telegram import (
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    Message,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -20,7 +21,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    Message,
+    MessageHandler,
     CallbackQueryHandler,
     filters,
 )
