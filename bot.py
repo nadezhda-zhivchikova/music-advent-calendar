@@ -783,9 +783,9 @@ def main():
             time=t,
             days=(0, 1, 2, 3, 4, 5, 6),
             data={"slot": slot},
-            timezone=TIMEZONE,
             name=f"broadcast_slot_{slot}",
         )
+
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
