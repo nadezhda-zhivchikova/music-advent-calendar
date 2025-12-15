@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # 🔒 Не логируем HTTP-запросы с токеном
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+
 # --- Timezone ---
 TIMEZONE = pytz.timezone("Asia/Tbilisi")
 
@@ -278,21 +279,52 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
     now = get_local_now()
     today = now.date()
 
+    logger.info(
+        "[BROADCAST] Job started | slot=%s | now=%s",
+        slot,
+        now.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
     if today < BROADCAST_START or today > BROADCAST_END:
+        logger.info(
+            "[BROADCAST] Outside date range | today=%s",
+            today.isoformat(),
+        )
         return
 
     today_iso = today.isoformat()
     tracks = get_tracks_for_date_slot(today_iso, slot)
+
     if not tracks:
-        logger.info("No tracks for %s slot %s", today_iso, slot)
+        logger.info(
+            "[BROADCAST] No tracks found | date=%s | slot=%s",
+            today_iso,
+            slot,
+        )
         return
 
     subs = load_subscribers()
+    subs_count = len(subs)
+
     if not subs:
-        logger.info("No subscribers for broadcast")
+        logger.info(
+            "[BROADCAST] No subscribers | date=%s | slot=%s",
+            today_iso,
+            slot,
+        )
         return
 
+    logger.info(
+        "[BROADCAST] Preparing send | date=%s | slot=%s | tracks=%d | subscribers=%d",
+        today_iso,
+        slot,
+        len(tracks),
+        subs_count,
+    )
+
     log = load_broadcast_log()
+    sent_chats = 0
+    skipped_chats = 0
 
     for chat_id in list(subs):
         key = str(chat_id)
@@ -302,17 +334,26 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
             entry = {"last_date": today_iso, "sent_slots": []}
 
         if slot in entry.get("sent_slots", []):
-            continue  # уже отправляли этот слот сегодня
+            skipped_chats += 1
+            continue
 
-        # На один слот может быть 1 трек (обычно), но поддержим список
         for t in tracks:
             await send_track_to_chat(context, chat_id, t)
 
         entry["sent_slots"].append(slot)
         log[key] = entry
+        sent_chats += 1
 
     save_broadcast_log(log)
-    logger.info("Broadcast done for %s slot %s to %d chats", today_iso, slot, len(subs))
+
+    logger.info(
+        "[BROADCAST] Done | date=%s | slot=%s | sent_to=%d | skipped=%d",
+        today_iso,
+        slot,
+        sent_chats,
+        skipped_chats,
+    )
+
 
 
 # ---------- Клавиатуры ----------
@@ -426,6 +467,8 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     subs.add(chat_id)
     save_subscribers(subs)
+
+    logger.info("Subscribed chat_id=%s | total_subscribers=%d", chat_id, len(subs))
 
     await update.message.reply_text(
         "🎶 Подписка активирована!\n\n"
@@ -698,6 +741,14 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for t in tracks:
             await send_track_to_chat(context, chat_id, t)
             sent += 1
+
+    logger.info(
+        "[BROADCAST_TEST] chat_id=%s | date=%s | slots=%s | sent=%d",
+        chat_id,
+        day_iso,
+        ",".join(slots),
+        sent,
+    )
 
     # --- ответ админу ---
     text = (
