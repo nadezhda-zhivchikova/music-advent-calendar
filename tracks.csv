@@ -1,5 +1,44 @@
-id,title,artist,link,from,message
-1,December Song,Example Artist,https://youtu.be/example1,Nadya,"I chose this track because it feels like a quiet December morning."
-2,Winter Lights,Another Artist,https://open.spotify.com/example2,Alex,"This song always reminds me that winter can be both cold and cozy."
-3,Snow City,Band Name,https://youtu.be/example3,Mia,"I usually play this track when I walk in the evening."
-4,Crystal Night,Unknown Artist,https://youtu.be/example4,Leo,"A calm song that helps me focus and breathe."
+id,date,slot,title&artist,video_link,audio,message
+1,2025-12-16,1,Щедрик Ведрик,,https://www.youtube.com/watch?v=FPUF8-p86y4,,,
+2,2025-12-16,2,All I want for Christmas is you - Mariah Carey,https://www.youtube.com/watch?v=yXQViqx6GMY,,,
+3,2025-12-16,3,,,,,
+
+4,2025-12-17,1,ჟირაფი ჟოზე "საახალწლო სიმღერა",https://www.youtube.com/watch?v=TvOO2f8rIko,,,
+5,2025-12-17,2,Sia-Snowman,https://www.youtube.com/watch?v=gset79KMmt0,,,
+6,2025-12-17,3,,,,,
+
+7,2025-12-18,1,Paul Mccartney - Wonderful Christmas Time,https://www.youtube.com/watch?v=94Ye-3C1FC8,,,
+8,2025-12-18,2,Beach Boys - Little Saint Nick,https://www.youtube.com/watch?v=xp9rK8FmYog,,,
+9,2025-12-18,3,Coldplay - Christmas Lights,https://www.youtube.com/watch?v=z1rYmzQ8C9Q,,,
+
+10,2025-12-19,1,Stille Nacht — Clare College Orchestra,https://www.youtube.com/watch?v=YRF8B3wYI_c,,,
+11,2025-12-19,2,Coco Jambo by Mr. President,https://www.youtube.com/watch?v=EScLmWJs82I,,Когда подумаешь что с тобой что-то не так вспомни что Трамп публично признал себя фашистом,
+12,2025-12-19,3,,,,,
+
+13,2025-12-20,1,Майот - Cнег,https://www.youtube.com/watch?v=d4azQooudCc,,,
+14,2025-12-20,2,Chumbala cachumbala,https://www.youtube.com/watch?v=YXi2iMq8HDU,,Quando el laroj marco oas dos las calaveras comen aroz,
+15,2025-12-20,3,Feduk - Хлопья летят наверх,https://www.youtube.com/watch?v=ENAwnVMwxhM,,,
+
+16,2025-12-21,1,Headbangeeeeerrrr!!! От BABYMETAL,https://www.youtube.com/watch?v=2IzR_ClTE8Y,,,
+17,2025-12-21,2,Red water(Christmas morning) type o negative,https://www.youtube.com/watch?v=-YonAM-cJrE,,,
+18,2025-12-21,3,Twisted sister - I saw mommy kissing Santa Claus,https://www.youtube.com/watch?v=CYBv5_RV7fA,,,
+
+19,2025-12-22,1,Dean Martin - let it snow,https://www.youtube.com/watch?v=Rnil5LyK_B0,,,
+20,2025-12-22,2,Brenda Lee- rockin‘ around the Christmas tree,https://www.youtube.com/watch?v=TFsZy9t-qDc,,,
+21,2025-12-22,3,,,,,
+
+22,2025-12-23,1,Band Aid - Do they know it’s Christmas,https://www.youtube.com/watch?v=RH-xd5bPKTA,,,
+23,2025-12-23,2,Felicità AlBano,https://www.youtube.com/watch?v=xUj-lfx6vbo,,Felice anno a tutti!,
+24,2025-12-23,3,,,,,
+
+25,2025-12-24,1,Everyday Buddy Holly,https://www.youtube.com/watch?v=EqWwy6BCxxU&list=RDEqWwy6BCxxU&start_radio=1,,,
+26,2025-12-24,2,Paul Potts - Turandot Act 3: Nessun dorma,https://www.youtube.com/watch?v=iZlrNw7mWeU,,,
+27,2025-12-24,3,,,,,,
+
+28,2025-12-25,1,John Lennon - Xmas (war is over),https://www.youtube.com/watch?v=yN4Uu0OlmTg,,,
+29,2025-12-25,2,Jingle bells - Bobby Helms,https://www.youtube.com/watch?v=ZnDmmiiFSUU,,,
+30,2025-12-25,3,,,,,,
+
+31,2025-12-26,1,Coldplay - Christmas Lights,https://www.youtube.com/watch?v=z1rYmzQ8C9Q,,,
+32,2025-12-26,2,Wham!-last Christmas,https://www.youtube.com/watch?v=E8gmARGvPlI,,,
+33,2025-12-26,3,Дискотека авария-Новогодняя,https://www.youtube.com/watch?v=xviBEvbxgZ0,,,
