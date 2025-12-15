@@ -38,10 +38,12 @@ TIMEZONE = pytz.timezone("Asia/Tbilisi")
 TRACKS_FILE = "tracks.csv"
 HISTORY_FILE = "user_history.json"
 VOTES_FILE = "votes.json"
+SUBSCRIBERS_FILE = "subscribers.json"
 
 TRACKS_CACHE = None
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))  # или захардкодить: 123456789
 
+# Admin user id (set as Railway variable ADMIN_USER_ID)
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
 
 # ---------- Работа с треками ----------
@@ -49,7 +51,8 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))  # или захардко�
 def load_tracks():
     """
     Загружаем треки из tracks.csv (кэшируем в памяти).
-    Ожидаются поля: id, title, artist, link, from, message.
+    Ожидаются поля (для /today): id, title, artist, link, from, message.
+    Для рассылки можно использовать отдельный формат, но этот бот использует текущий формат.
     """
     global TRACKS_CACHE
     if TRACKS_CACHE is not None:
@@ -111,13 +114,11 @@ def get_local_now():
 
 
 def is_window_open(now: datetime) -> bool:
-    return True
-    
     """
-    Открыто ли «окошко» 08:00–10:00.
+    Открыто ли «окошко» 08:00–10:00 (по TIMEZONE).
+    08:00 включительно, 10:00 не включительно.
     """
-    hour = now.hour
-    return 8 <= hour < 10
+    return 8 <= now.hour < 10
 
 
 def choose_track_for_user(chat_id: int, today_date: str):
@@ -177,9 +178,7 @@ def build_vote_inline_keyboard(track_id: str):
     Инлайн-кнопка для голосования за трек.
     """
     return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("❤️ I like this track", callback_data=f"VOTE:{track_id}")]
-        ]
+        [[InlineKeyboardButton("❤️ I like this track", callback_data=f"VOTE:{track_id}")]]
     )
 
 
@@ -229,7 +228,6 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voters = set(entry.get("voters", []))
 
     if user_id in voters:
-        # пользователь уже голосовал за этот трек
         await query.answer("You already voted for this track 💿", show_alert=False)
         return
 
@@ -239,8 +237,98 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     votes[track_id] = entry
     save_votes(votes)
 
+    logger.info("User %s liked track %s", user_id, track_id)
     await query.answer("Thank you for your vote! ❤️", show_alert=False)
 
+
+# ---------- Subscribers (optional, for future broadcast) ----------
+
+def load_subscribers():
+    path = Path(SUBSCRIBERS_FILE)
+    if not path.exists():
+        return set()
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+            return set(map(int, data.get("chat_ids", [])))
+    except Exception as e:
+        logger.error("Failed to load subscribers: %s", e)
+        return set()
+
+
+def save_subscribers(chat_ids: set[int]):
+    path = Path(SUBSCRIBERS_FILE)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump({"chat_ids": sorted(list(chat_ids))}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Failed to save subscribers: %s", e)
+
+
+# ---------- Admin: /setaudio ----------
+
+async def setaudio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Админская команда: включает режим ожидания аудиофайла.
+    После этого админ отправляет аудио, бот возвращает file_id.
+    """
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to use /setaudio.")
+        return
+
+    context.user_data["awaiting_audio"] = True
+    await update.message.reply_text(
+        "🎧 Send me the audio file now (as an Audio). "
+        "I’ll reply with its file_id for tracks.csv.\n\n"
+        "Tip: you can also send an audio with caption /setaudio."
+    )
+
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Принимает аудио и возвращает file_id.
+    Работает в двух режимах:
+    1) после команды /setaudio (awaiting_audio=True)
+    2) если в подписи к аудио есть /setaudio
+    """
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        return
+
+    msg = update.message
+    if msg is None or msg.audio is None:
+        return
+
+    caption = (msg.caption or "").strip()
+    awaiting = context.user_data.get("awaiting_audio", False)
+    caption_mode = caption.startswith("/setaudio")
+
+    if not (awaiting or caption_mode):
+        await msg.reply_text(
+            "If you want to save this audio’s file_id, send /setaudio first "
+            "or add caption /setaudio to the audio message."
+        )
+        return
+
+    audio = msg.audio
+    file_id = audio.file_id
+    unique_id = audio.file_unique_id  # debug
+    title = audio.title or ""
+    performer = audio.performer or ""
+    duration = audio.duration
+
+    context.user_data["awaiting_audio"] = False
+
+    logger.info("Admin uploaded audio. file_id=%s unique_id=%s", file_id, unique_id)
+
+    await msg.reply_text(
+        "✅ Audio saved.\n\n"
+        f"file_id:\n{file_id}\n\n"
+        f"(debug) file_unique_id: {unique_id}\n"
+        f"Title: {title}\nPerformer: {performer}\nDuration: {duration}s\n\n"
+        "👉 Put this file_id into tracks.csv column `audio`."
+    )
 
 
 # ---------- Handlers ----------
@@ -248,16 +336,11 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Welcome to the Advent Music Calendar 🎄🎧\n\n"
-        #"Every morning between 08:00 and 10:00 "
         "You can open ONE track with a message from the person who chose it.\n\n"
         "Press the button below or send /today to open today’s track.\n"
         "You can also tap ❤️ under a track to vote for it. At the end of December we’ll count the top 5."
     )
-
-    await update.message.reply_text(
-        text,
-        reply_markup=build_main_keyboard(),
-    )
+    await update.message.reply_text(text, reply_markup=build_main_keyboard())
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,6 +373,8 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = track["message"]
     track_id = track["id"]
 
+    logger.info("Chat %s opened track %s for %s", chat_id, track_id, today_date)
+
     text = (
         f"✨ Advent Music Calendar\n\n"
         f"🎵 *Track of the day:*\n"
@@ -300,8 +385,6 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"If you liked this track, tap ❤️ below!"
     )
 
-    # ВНИМАНИЕ: здесь НЕ передаём reply_markup с обычной клавиатурой,
-    # чтобы не перебивать её. Reply-клавиатура уже установлена в /start.
     await update.message.reply_markdown(
         text,
         reply_markup=build_vote_inline_keyboard(track_id),
@@ -314,15 +397,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🎵 Open today’s track":
         return await today(update, context)
 
-    await update.message.reply_text(
-        "Use /today or the button to open today’s track. 🎄"
-    )
+    await update.message.reply_text("Use /today or the button to open today’s track. 🎄")
 
 
 async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Показывает топ-5 треков по количеству лайков.
-    Можно вызывать 31 декабря, чтобы получить финальный список.
     """
     tracks = load_tracks()
     track_by_id = {t["id"]: t for t in tracks}
@@ -351,15 +431,12 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🏆 Top 5 Advent Tracks (by likes):", ""]
     for i, (likes, t) in enumerate(top, start=1):
-        title = t["title"]
-        artist = t["artist"]
-        link = t["link"]
-        lines.append(f"{i}. {title} — {artist}  ({likes} ❤️)")
-        if link:
-            lines.append(f"   {link}")
+        lines.append(f"{i}. {t['title']} — {t['artist']}  ({likes} ❤️)")
+        if t.get("link"):
+            lines.append(f"   {t['link']}")
 
-    text = "\n".join(lines)
-    await update.message.reply_text(text)
+    await update.message.reply_text("\n".join(lines))
+
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -367,7 +444,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Доступна только админу (ADMIN_USER_ID).
     """
     user = update.effective_user
-    logger.info("User: ", user.id)
+    logger.info("User id: %s", user.id if user else None)
+    logger.info("ADMIN_USER_ID: %s", ADMIN_USER_ID)
+
     if user is None or user.id != ADMIN_USER_ID:
         await update.message.reply_text("You are not allowed to view stats.")
         return
@@ -379,30 +458,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No tracks found in tracks.csv.")
         return
 
-    # Собираем лайки по track_id (включая 0)
-    likes_by_id = {}
-    for t in tracks:
-        track_id = t["id"]
-        likes_by_id[track_id] = int(votes.get(track_id, {}).get("likes", 0))
-
-    # сортируем по лайкам (по убыванию)
-    tracks_sorted = sorted(
-        tracks,
-        key=lambda t: likes_by_id.get(t["id"], 0),
-        reverse=True,
-    )
+    likes_by_id = {t["id"]: int(votes.get(t["id"], {}).get("likes", 0)) for t in tracks}
+    tracks_sorted = sorted(tracks, key=lambda t: likes_by_id.get(t["id"], 0), reverse=True)
 
     lines = ["📊 Advent Music – full stats:", ""]
     for t in tracks_sorted:
-        track_id = t["id"]
-        title = t["title"]
-        artist = t["artist"]
-        likes = likes_by_id.get(track_id, 0)
-        lines.append(f"{track_id}. {title} — {artist}  ({likes} ❤️)")
+        lines.append(f'{t["id"]}. {t["title"]} — {t["artist"]}  ({likes_by_id.get(t["id"], 0)} ❤️)')
 
-    text = "\n".join(lines)
-    await update.message.reply_text(text)
-
+    await update.message.reply_text("\n".join(lines))
 
 
 # ---------- Main ----------
@@ -419,6 +482,10 @@ def main():
     application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("top5", top5))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("setaudio", setaudio))
+
+    # Important: audio handler before text handler
+    application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
