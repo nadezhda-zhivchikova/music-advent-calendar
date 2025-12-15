@@ -20,7 +20,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    Messager,
+    MessageHandler,
     CallbackQueryHandler,
     filters,
 )
@@ -724,6 +724,17 @@ def main():
 
     application = ApplicationBuilder().token(token).build()
 
+    # --- Scheduled broadcasts (16–26 Dec, slots 1–3) ---
+    for slot, t in SLOT_SEND_TIMES.items():
+        application.job_queue.run_daily(
+            broadcast_slot_job,
+            time=t,
+            days=(0, 1, 2, 3, 4, 5, 6),
+            data={"slot": slot},
+            timezone=TIMEZONE,
+            name=f"broadcast_slot_{slot}",
+        )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
 
@@ -735,26 +746,15 @@ def main():
     application.add_handler(CommandHandler("unsubscribe", unsubscribe))
 
     application.add_handler(CommandHandler("setaudio", setaudio))
+    application.add_handler(CommandHandler("broadcast_test", broadcast_test))
 
     # Important: audio handler before text handler
     application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
-
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
-    application.add_handler(CommandHandler("broadcast_test", broadcast_test))
 
     application.run_polling()
-
-    # --- Scheduled broadcasts (16–26 Dec, slots 1–3) ---
-    for slot, t in SLOT_SEND_TIMES.items():
-        application.job_queue.run_daily(
-            broadcast_slot_job,
-            time=t,
-            days=(0, 1, 2, 3, 4, 5, 6),  # каждый день
-            data={"slot": slot},
-            timezone=TIMEZONE,
-            name=f"broadcast_slot_{slot}",
-        )
 
 
 
