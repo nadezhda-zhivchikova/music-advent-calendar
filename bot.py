@@ -134,8 +134,6 @@ def choose_track_for_user(chat_id: int, today_date: str):
     - если уже выдавали трек сегодня -> вернуть тот же;
     - иначе выбрать случайный из тех, что ещё НЕ были у пользователя;
     - если все уже были, начать новый круг со всех треков.
-
-    Важно: используется только поле id и остальные поля трека для отображения.
     """
     tracks = load_tracks()
     if not tracks:
@@ -145,14 +143,12 @@ def choose_track_for_user(chat_id: int, today_date: str):
     key = str(chat_id)
     user_entry = history.get(key)
 
-    # Уже был трек сегодня -> возвращаем его
     if user_entry and user_entry.get("last_date") == today_date:
         track_id = user_entry.get("track_id")
         for t in tracks:
             if t["id"] == track_id:
                 return t
 
-    # Иначе выбираем новый
     used_ids = set(user_entry.get("used_track_ids", [])) if user_entry else set()
     available = [t for t in tracks if t["id"] not in used_ids]
 
@@ -172,6 +168,8 @@ def choose_track_for_user(chat_id: int, today_date: str):
     return chosen
 
 
+# ---------- Клавиатуры ----------
+
 def build_main_keyboard():
     keyboard = [
         [KeyboardButton("🎵 Open today’s track")],
@@ -179,10 +177,15 @@ def build_main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
+def build_start_keyboard():
+    keyboard = [
+        [KeyboardButton("🔔 Подписаться")],
+        [KeyboardButton("🎵 Open today’s track")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
 def build_vote_inline_keyboard(track_id: str):
-    """
-    Инлайн-кнопка для голосования за трек.
-    """
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("❤️ I like this track", callback_data=f"VOTE:{track_id}")]]
     )
@@ -215,10 +218,6 @@ def save_votes(votes: dict):
 
 
 async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработка нажатия на кнопку "❤️ I like this track".
-    Один пользователь может поставить лайк одному треку только один раз.
-    """
     query = update.callback_query
     data = query.data or ""
     await query.answer()
@@ -247,7 +246,7 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Thank you for your vote! ❤️", show_alert=False)
 
 
-# ---------- Subscribers (optional, for future broadcast) ----------
+# ---------- Subscribers ----------
 
 def load_subscribers():
     path = Path(SUBSCRIBERS_FILE)
@@ -271,13 +270,39 @@ def save_subscribers(chat_ids: set[int]):
         logger.error("Failed to save subscribers: %s", e)
 
 
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+
+    if chat_id in subs:
+        await update.message.reply_text("✅ Вы уже подписаны.")
+        return
+
+    subs.add(chat_id)
+    save_subscribers(subs)
+
+    await update.message.reply_text(
+        "🎶 Подписка активирована!\n\n"
+        "С 16 по 26 декабря вы будете получать 2–3 трека в день. ✨"
+    )
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+
+    if chat_id not in subs:
+        await update.message.reply_text("ℹ️ Вы не были подписаны.")
+        return
+
+    subs.discard(chat_id)
+    save_subscribers(subs)
+    await update.message.reply_text("🧹 Подписка отключена.")
+
+
 # ---------- Admin: /setaudio ----------
 
 async def setaudio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Админская команда: включает режим ожидания аудиофайла.
-    После этого админ отправляет аудио, бот возвращает file_id.
-    """
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
         await update.message.reply_text("You are not allowed to use /setaudio.")
@@ -292,12 +317,6 @@ async def setaudio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Принимает аудио и возвращает file_id.
-    Работает в двух режимах:
-    1) после команды /setaudio (awaiting_audio=True)
-    2) если в подписи к аудио есть /setaudio
-    """
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
         return
@@ -343,6 +362,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "В каждом сообщении вы получите:\n"
         "• название трека\n"
         "• ссылку на клип или аудио\n"
+        "• короткое сообщение\n\n"
         "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇"
     )
 
@@ -350,6 +370,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text,
         reply_markup=build_start_keyboard(),
     )
+
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = get_local_now()
@@ -381,9 +402,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info("Chat %s opened track %s for %s", chat_id, track_id, today_date)
 
-    # message может быть пустым — тогда не вставляем лишнюю пустую строку
     msg_block = (message + "\n\n") if message else ""
-
     link_block = f"🔗 [Watch / Listen here]({video_link})" if video_link else "🔗 (no link)"
 
     text = (
@@ -415,10 +434,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄"
     )
 
+
 async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Показывает топ-5 треков по количеству лайков.
-    """
     tracks = load_tracks()
     track_by_id = {t["id"]: t for t in tracks}
     votes = load_votes()
@@ -454,10 +471,6 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Админская команда: показывает список ВСЕХ треков и количество лайков.
-    Доступна только админу (ADMIN_USER_ID).
-    """
     user = update.effective_user
     logger.info("User id: %s", user.id if user else None)
     logger.info("ADMIN_USER_ID: %s", ADMIN_USER_ID)
@@ -496,10 +509,15 @@ def main():
     application = ApplicationBuilder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("today", today))
     application.add_handler(CommandHandler("help", start))
+
+    application.add_handler(CommandHandler("today", today))
     application.add_handler(CommandHandler("top5", top5))
     application.add_handler(CommandHandler("stats", stats))
+
+    application.add_handler(CommandHandler("subscribe", subscribe))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
+
     application.add_handler(CommandHandler("setaudio", setaudio))
 
     # Important: audio handler before text handler
