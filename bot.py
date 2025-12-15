@@ -1,11 +1,13 @@
 import os
 import logging
-from datetime import datetime
 import pytz
 import csv
 import json
 from pathlib import Path
 import random
+from datetime import datetime, time, date
+from telegram.error import Forbidden, BadRequest
+
 
 from telegram import (
     Update,
@@ -34,6 +36,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- Timezone ---
 TIMEZONE = pytz.timezone("Asia/Tbilisi")
+
+BROADCAST_START = date(2025, 12, 16)
+BROADCAST_END = date(2025, 12, 26)
+
+# Во сколько отправлять slot 1/2/3 (Asia/Tbilisi)
+SLOT_SEND_TIMES = {
+    "1": time(9, 0),   # 09:00
+    "2": time(13, 0),  # 13:00
+    "3": time(18, 0),  # 18:00
+}
+
+BROADCAST_LOG_FILE = "broadcast_log.json"
 
 # --- Files ---
 TRACKS_FILE = "tracks.csv"
@@ -89,6 +103,31 @@ def load_tracks():
 
 
 # ---------- История треков по пользователям (/today) ----------
+
+def load_broadcast_log():
+    """
+    {chat_id: {"last_date": "YYYY-MM-DD", "sent_slots": ["1","2"]}}
+    """
+    path = Path(BROADCAST_LOG_FILE)
+    if not path.exists():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Failed to load broadcast log: %s", e)
+        return {}
+
+
+def save_broadcast_log(data: dict):
+    path = Path(BROADCAST_LOG_FILE)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Failed to save broadcast log: %s", e)
+
+
 
 def load_history():
     """
@@ -166,6 +205,114 @@ def choose_track_for_user(chat_id: int, today_date: str):
     }
     save_history(history)
     return chosen
+
+def get_tracks_for_date_slot(day_iso: str, slot: str) -> list[dict]:
+    tracks = load_tracks()
+    out = []
+    for t in tracks:
+        if (t.get("date") == day_iso) and (str(t.get("slot")) == str(slot)):
+            # не шлём пустые строки
+            if (t.get("title_artist") or "").strip() or (t.get("video_link") or "").strip() or (t.get("audio") or "").strip():
+                out.append(t)
+    # на всякий случай сортировка по id
+    out.sort(key=lambda x: int(x.get("id") or 0))
+    return out
+
+
+def format_track_text(track: dict) -> str:
+    title_artist = (track.get("title_artist") or "").strip() or "(no title)"
+    video_link = (track.get("video_link") or "").strip()
+    message = (track.get("message") or "").strip()
+
+    msg_block = f"{message}\n\n" if message else ""
+    link_block = f"🔗 [Watch / Listen here]({video_link})\n\n" if video_link else ""
+
+    return (
+        "🎄 *Advent Music Calendar*\n\n"
+        f"🎵 *Track:*\n_{title_artist}_\n\n"
+        f"{msg_block}"
+        f"{link_block}"
+        "Если вам понравилось — нажмите ❤️"
+    )
+
+
+async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, track: dict):
+    track_id = track.get("id", "")
+    text = format_track_text(track)
+    audio_file_id = (track.get("audio") or "").strip()
+
+    try:
+        if audio_file_id:
+            # caption у аудио ограничен по длине — держим компактным
+            await context.bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file_id,
+                caption=text[:900],
+                parse_mode="Markdown",
+                reply_markup=build_vote_inline_keyboard(track_id),
+                disable_notification=True,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=build_vote_inline_keyboard(track_id),
+                disable_web_page_preview=False,
+                disable_notification=True,
+            )
+    except Forbidden:
+        # бот больше не может писать в чат — удаляем из подписчиков
+        subs = load_subscribers()
+        if chat_id in subs:
+            subs.discard(chat_id)
+            save_subscribers(subs)
+        logger.warning("Forbidden: removed chat %s from subscribers", chat_id)
+    except BadRequest as e:
+        logger.error("BadRequest when sending to %s: %s", chat_id, e)
+    except Exception as e:
+        logger.error("Unexpected send error to %s: %s", chat_id, e)
+
+async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
+    slot = str(context.job.data.get("slot"))
+    now = get_local_now()
+    today = now.date()
+
+    if today < BROADCAST_START or today > BROADCAST_END:
+        return
+
+    today_iso = today.isoformat()
+    tracks = get_tracks_for_date_slot(today_iso, slot)
+    if not tracks:
+        logger.info("No tracks for %s slot %s", today_iso, slot)
+        return
+
+    subs = load_subscribers()
+    if not subs:
+        logger.info("No subscribers for broadcast")
+        return
+
+    log = load_broadcast_log()
+
+    for chat_id in list(subs):
+        key = str(chat_id)
+        entry = log.get(key, {"last_date": "", "sent_slots": []})
+
+        if entry.get("last_date") != today_iso:
+            entry = {"last_date": today_iso, "sent_slots": []}
+
+        if slot in entry.get("sent_slots", []):
+            continue  # уже отправляли этот слот сегодня
+
+        # На один слот может быть 1 трек (обычно), но поддержим список
+        for t in tracks:
+            await send_track_to_chat(context, chat_id, t)
+
+        entry["sent_slots"].append(slot)
+        log[key] = entry
+
+    save_broadcast_log(log)
+    logger.info("Broadcast done for %s slot %s to %d chats", today_iso, slot, len(subs))
 
 
 # ---------- Клавиатуры ----------
@@ -494,6 +641,79 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines))
 
+async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Админ-команда для тестовой отправки ТОЛЬКО в текущий чат.
+
+    Использование:
+      /broadcast_test              -> сегодня, slot 1
+      /broadcast_test 2            -> сегодня, slot 2
+      /broadcast_test all          -> сегодня, slot 1+2+3
+      /broadcast_test 2025-12-16 1
+      /broadcast_test 2025-12-16 all
+    """
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to use /broadcast_test.")
+        return
+
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    now = get_local_now()
+    day_iso = now.date().isoformat()
+    slot_arg = "1"
+
+    # --- парсинг аргументов ---
+    if len(args) == 1:
+        if args[0].lower() in ("1", "2", "3", "all"):
+            slot_arg = args[0].lower()
+        else:
+            day_iso = args[0]
+    elif len(args) >= 2:
+        day_iso = args[0]
+        slot_arg = args[1].lower()
+
+    if slot_arg not in ("1", "2", "3", "all"):
+        await update.message.reply_text(
+            "Usage:\n"
+            "/broadcast_test\n"
+            "/broadcast_test 2\n"
+            "/broadcast_test all\n"
+            "/broadcast_test YYYY-MM-DD 1|2|3|all"
+        )
+        return
+
+    slots = ["1", "2", "3"] if slot_arg == "all" else [slot_arg]
+
+    sent = 0
+    missing = []
+
+    for slot in slots:
+        tracks = get_tracks_for_date_slot(day_iso, slot)
+        if not tracks:
+            missing.append(slot)
+            continue
+
+        for t in tracks:
+            await send_track_to_chat(context, chat_id, t)
+            sent += 1
+
+    # --- ответ админу ---
+    text = (
+        "✅ Broadcast test finished\n\n"
+        f"Chat ID: {chat_id}\n"
+        f"Date: {day_iso}\n"
+        f"Slots: {', '.join(slots)}\n"
+        f"Messages sent: {sent}"
+    )
+
+    if missing:
+        text += f"\n⚠️ No tracks for slot(s): {', '.join(missing)}"
+
+    await update.message.reply_text(text)
+
+
 
 # ---------- Main ----------
 
@@ -521,8 +741,21 @@ def main():
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
+    application.add_handler(CommandHandler("broadcast_test", broadcast_test))
 
     application.run_polling()
+
+    # --- Scheduled broadcasts (16–26 Dec, slots 1–3) ---
+    for slot, t in SLOT_SEND_TIMES.items():
+        application.job_queue.run_daily(
+            broadcast_slot_job,
+            time=t,
+            days=(0, 1, 2, 3, 4, 5, 6),  # каждый день
+            data={"slot": slot},
+            timezone=TIMEZONE,
+            name=f"broadcast_slot_{slot}",
+        )
+
 
 
 if __name__ == "__main__":
