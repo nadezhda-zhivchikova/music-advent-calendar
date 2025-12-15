@@ -20,7 +20,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    Messager,
+    Message,
     CallbackQueryHandler,
     filters,
 )
