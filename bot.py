@@ -36,17 +36,18 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# --- Timezone ---
-TIMEZONE = pytz.timezone("Asia/Tbilisi")
+from zoneinfo import ZoneInfo
+TIMEZONE = ZoneInfo("Asia/Tbilisi")
 
 BROADCAST_START = date(2025, 12, 16)
 BROADCAST_END = date(2025, 12, 26)
 
 # Во сколько отправлять slot 1/2/3 (Asia/Tbilisi)
+
 SLOT_SEND_TIMES = {
-    "1": time(8, 35),   # 08:35
-    "2": time(12, 15),  # 12:15
-    "3": time(16, 00),  # 16:00
+    "1": time(8, 35, tzinfo=TIMEZONE),
+    "2": time(13, 15, tzinfo=TIMEZONE),
+    "3": time(16, 0, tzinfo=TIMEZONE),
 }
 
 BROADCAST_LOG_FILE = "broadcast_log.json"
