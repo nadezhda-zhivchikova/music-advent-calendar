@@ -44,7 +44,7 @@ BROADCAST_END = date(2025, 12, 26)
 
 # Во сколько отправлять slot 1/2/3 (Asia/Tbilisi)
 SLOT_SEND_TIMES = {
-    "1": time(9, 0),   # 09:00
+    "1": time(8, 35),   # 08:35
     "2": time(13, 0),  # 13:00
     "3": time(18, 0),  # 18:00
 }
