@@ -771,6 +771,8 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
+    logger.info("TOKEN hash prefix: %s", hash(token) % 100000)
+
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it as an environment variable.")
 
