@@ -541,6 +541,68 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 Put this file_id into tracks.csv column `audio`."
     )
 
+async def subscribers_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to use this command.")
+        return
+
+    subs = load_subscribers()
+    await update.message.reply_text(
+        f"👥 Подписчиков: {len(subs)}"
+    )
+
+async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to use this command.")
+        return
+
+    files = {
+        "subscribers.json": SUBSCRIBERS_FILE,
+        "votes.json": VOTES_FILE,
+        "broadcast_log.json": BROADCAST_LOG_FILE,
+    }
+
+    sent_any = False
+
+    for name, path in files.items():
+        p = Path(path)
+        if not p.exists():
+            await update.message.reply_text(f"⚠️ {name} not found.")
+            continue
+
+        try:
+            await update.message.reply_document(
+                document=p,
+                filename=name,
+                caption=f"📦 Backup: {name}",
+            )
+            sent_any = True
+        except Exception as e:
+            logger.error("Backup failed for %s: %s", name, e)
+            await update.message.reply_text(f"❌ Failed to send {name}")
+
+    if sent_any:
+        await update.message.reply_text("✅ Backup completed.")
+
+async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to use /restore.")
+        return
+
+    context.user_data["awaiting_restore"] = True
+
+    await update.message.reply_text(
+        "♻️ Restore mode enabled.\n\n"
+        "Please send ONE of the following JSON files:\n"
+        "• subscribers.json\n"
+        "• votes.json\n"
+        "• broadcast_log.json\n\n"
+        "I will restore it immediately."
+    )
+
 
 # ---------- Handlers ----------
 
@@ -685,6 +747,63 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines))
 
+async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        return
+
+    if not context.user_data.get("awaiting_restore"):
+        return
+
+    doc = update.message.document
+    if doc is None:
+        return
+
+    filename = doc.file_name
+    allowed = {
+        "subscribers.json": SUBSCRIBERS_FILE,
+        "votes.json": VOTES_FILE,
+        "broadcast_log.json": BROADCAST_LOG_FILE,
+    }
+
+    if filename not in allowed:
+        await update.message.reply_text(
+            "❌ Unsupported file.\n"
+            "Allowed files:\n"
+            "• subscribers.json\n"
+            "• votes.json\n"
+            "• broadcast_log.json"
+        )
+        return
+
+    # Скачиваем файл
+    file = await doc.get_file()
+    content = await file.download_as_bytearray()
+
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except Exception:
+        await update.message.reply_text("❌ Invalid JSON file.")
+        return
+
+    # Записываем файл
+    path = Path(allowed[filename])
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Restore failed for %s: %s", filename, e)
+        await update.message.reply_text("❌ Failed to write file.")
+        return
+
+    context.user_data["awaiting_restore"] = False
+
+    await update.message.reply_text(
+        f"✅ Restored `{filename}` successfully.",
+        parse_mode="Markdown",
+    )
+
+
 async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Админ-команда для тестовой отправки ТОЛЬКО в текущий чат.
@@ -771,10 +890,10 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    logger.info("TOKEN hash prefix: %s", hash(token) % 100000)
-
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it as an environment variable.")
+
+    logger.info("TOKEN hash prefix: %s", hash(token) % 100000)
 
     application = ApplicationBuilder().token(token).build()
 
@@ -804,9 +923,13 @@ def main():
 
     # Important: audio handler before text handler
     application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
+    application.add_handler(CommandHandler("subscribers", subscribers_count))
+    application.add_handler(CommandHandler("backup", backup))
+    application.add_handler(CommandHandler("restore", restore))
 
     application.run_polling()
 
