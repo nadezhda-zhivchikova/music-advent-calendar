@@ -582,40 +582,67 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_notification=True,
     )
 
-
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = get_local_now()
     local_time_str = now.strftime("%H:%M")
-    today_date = now.date().isoformat()
+    today_iso = now.date().isoformat()
 
     if not is_window_open(now):
         await update.message.reply_text(
             f"The Advent window is closed now. ⏰\n\n"
             f"You can open today’s track between 08:00 and 10:00.\n"
-            f"Current time: {local_time_str}.",
-            disable_notification=True,
+            f"Current time: {local_time_str}."
         )
         return
 
-    chat_id = update.effective_chat.id
-    track = choose_track_for_user(chat_id, today_date)
-
-    if track is None:
+    tracks_today = get_tracks_for_date(today_iso)
+    if not tracks_today:
         await update.message.reply_text(
-            "There are no tracks in the calendar yet. "
-            "Please ask the organizer to add some to tracks.csv. 🎧",
-            disable_notification=True,
+            f"No tracks for today ({today_iso}) yet. "
+            "Please check tracks.csv 🎧"
         )
         return
 
-    track_id = track.get("id", "")
-    text = format_track_text(track)
+    # Отправим все треки на сегодня (slot 1–3)
+    for t in tracks_today:
+        await send_track_to_chat(context, update.effective_chat.id, t)
 
-    await update.message.reply_markdown(
-        text,
-        reply_markup=build_vote_inline_keyboard(track_id),
-        disable_web_page_preview=False,
-    )
+
+def get_tracks_for_date(day_iso: str) -> list[dict]:
+    tracks = load_tracks()
+    out = []
+    for t in tracks:
+        if (t.get("date") == day_iso):
+            if (t.get("title_artist") or "").strip() or (t.get("video_link") or "").strip() or (t.get("audio") or "").strip():
+                out.append(t)
+    out.sort(key=lambda x: (int(x.get("slot") or 0), int(x.get("id") or 0)))
+    return out
+
+
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = get_local_now()
+    local_time_str = now.strftime("%H:%M")
+    today_iso = now.date().isoformat()
+
+    if not is_window_open(now):
+        await update.message.reply_text(
+            f"The Advent window is closed now. ⏰\n\n"
+            f"You can open today’s track between 08:00 and 10:00.\n"
+            f"Current time: {local_time_str}."
+        )
+        return
+
+    tracks_today = get_tracks_for_date(today_iso)
+    if not tracks_today:
+        await update.message.reply_text(
+            f"No tracks for today ({today_iso}) yet. "
+            "Please check tracks.csv 🎧"
+        )
+        return
+
+    # Отправим все треки на сегодня (slot 1–3)
+    for t in tracks_today:
+        await send_track_to_chat(context, update.effective_chat.id, t)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
