@@ -587,14 +587,6 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     local_time_str = now.strftime("%H:%M")
     today_iso = now.date().isoformat()
 
-    if not is_window_open(now):
-        await update.message.reply_text(
-            f"The Advent window is closed now. ⏰\n\n"
-            f"You can open today’s track between 08:00 and 10:00.\n"
-            f"Current time: {local_time_str}."
-        )
-        return
-
     tracks_today = get_tracks_for_date(today_iso)
     if not tracks_today:
         await update.message.reply_text(
@@ -624,14 +616,6 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     local_time_str = now.strftime("%H:%M")
     today_iso = now.date().isoformat()
 
-    if not is_window_open(now):
-        await update.message.reply_text(
-            f"The Advent window is closed now. ⏰\n\n"
-            f"You can open today’s track between 08:00 and 10:00.\n"
-            f"Current time: {local_time_str}."
-        )
-        return
-
     tracks_today = get_tracks_for_date(today_iso)
     if not tracks_today:
         await update.message.reply_text(
@@ -651,7 +635,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Подписаться":
         return await subscribe(update, context)
 
-    if text == "🎵 Open today’s track":
+    if text == "🎵 Open today’s tracks":
         return await today(update, context)
 
     await update.message.reply_text(
