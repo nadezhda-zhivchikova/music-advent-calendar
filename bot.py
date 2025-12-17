@@ -7,15 +7,14 @@ from pathlib import Path
 from datetime import datetime, time, date
 from zoneinfo import ZoneInfo
 
-from telegram.error import Forbidden, BadRequest
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     KeyboardButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from telegram.error import Forbidden, BadRequest
 
 from telegram.ext import (
     ApplicationBuilder,
@@ -26,7 +25,9 @@ from telegram.ext import (
     filters,
 )
 
-# --- Logging ---
+# =========================
+# Logging
+# =========================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -34,39 +35,56 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# --- Timezone ---
+# =========================
+# Timezone & schedule
+# =========================
 TIMEZONE = ZoneInfo("Asia/Tbilisi")
 
 BROADCAST_START = date(2025, 12, 16)
 BROADCAST_END = date(2025, 12, 26)
 
-# Во сколько отправлять slot 1/2/3 (Asia/Tbilisi)
+# slot times (Tbilisi)
 SLOT_SEND_TIMES = {
-    "1": time(8, 35, tzinfo=TIMEZONE),
+    "1": time(11, 15, tzinfo=TIMEZONE),
     "2": time(12, 15, tzinfo=TIMEZONE),
     "3": time(13, 15, tzinfo=TIMEZONE),
 }
 
-BROADCAST_LOG_FILE = "broadcast_log.json"
+# TOP5 send time (Dec 26)
+TOP5_SEND_TIME = time(20, 0, tzinfo=TIMEZONE)  # 20:00
 
-# --- Files ---
+# =========================
+# Files
+# =========================
 TRACKS_FILE = "tracks.csv"
 HISTORY_FILE = "user_history.json"
 VOTES_FILE = "votes.json"
 SUBSCRIBERS_FILE = "subscribers.json"
+BROADCAST_LOG_FILE = "broadcast_log.json"
 
 TRACKS_CACHE = None
 
-# Admin user id (set as Railway variable ADMIN_USER_ID)
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
 
-# ---------- Работа с треками ----------
+# =========================
+# Helpers
+# =========================
+def get_local_now() -> datetime:
+    return datetime.now(TIMEZONE)
 
+
+def is_window_open(now: datetime) -> bool:
+    # 08:00 <= time < 10:00
+    return True
+
+
+# =========================
+# Tracks
+# =========================
 def load_tracks():
     """
-    Загружаем треки из tracks.csv (кэшируем в памяти).
-    Ожидаются поля:
+    tracks.csv columns:
       id,date,slot,title&artist,video_link,audio,message
     """
     global TRACKS_CACHE
@@ -86,15 +104,17 @@ def load_tracks():
             if not row.get("id"):
                 continue
 
-            tracks.append({
-                "id": str(row.get("id", "")).strip(),
-                "date": (row.get("date") or "").strip(),   # YYYY-MM-DD
-                "slot": (row.get("slot") or "").strip(),   # "1"/"2"/"3"
-                "title_artist": (row.get("title&artist") or "").strip(),
-                "video_link": (row.get("video_link") or "").strip(),
-                "audio": (row.get("audio") or "").strip(),  # file_id
-                "message": (row.get("message") or "").strip(),
-            })
+            tracks.append(
+                {
+                    "id": str(row.get("id", "")).strip(),
+                    "date": (row.get("date") or "").strip(),
+                    "slot": (row.get("slot") or "").strip(),
+                    "title_artist": (row.get("title&artist") or "").strip(),
+                    "video_link": (row.get("video_link") or "").strip(),
+                    "audio": (row.get("audio") or "").strip(),
+                    "message": (row.get("message") or "").strip(),
+                }
+            )
 
     TRACKS_CACHE = tracks
     logger.info("Loaded %d tracks from %s", len(tracks), TRACKS_FILE)
@@ -106,17 +126,40 @@ def get_tracks_for_date_slot(day_iso: str, slot: str) -> list[dict]:
     out = []
     for t in tracks:
         if (t.get("date") == day_iso) and (str(t.get("slot")) == str(slot)):
-            if (t.get("title_artist") or "").strip() or (t.get("video_link") or "").strip() or (t.get("audio") or "").strip():
+            if (
+                (t.get("title_artist") or "").strip()
+                or (t.get("video_link") or "").strip()
+                or (t.get("audio") or "").strip()
+            ):
                 out.append(t)
+
     out.sort(key=lambda x: int(x.get("id") or 0))
     return out
 
 
-# ---------- Логи рассылки ----------
+def format_track_text(track: dict) -> str:
+    title_artist = (track.get("title_artist") or "").strip() or "(no title)"
+    video_link = (track.get("video_link") or "").strip()
+    message = (track.get("message") or "").strip()
 
+    msg_block = f"{message}\n\n" if message else ""
+    link_block = f"🔗 [Watch / Listen here]({video_link})\n\n" if video_link else ""
+
+    return (
+        "🎄 *Advent Music Calendar*\n\n"
+        f"🎵 *Track:*\n_{title_artist}_\n\n"
+        f"{msg_block}"
+        f"{link_block}"
+        "Если вам понравилось — нажмите ❤️"
+    )
+
+
+# =========================
+# Broadcast log
+# =========================
 def load_broadcast_log():
     """
-    {chat_id: {"last_date": "YYYY-MM-DD", "sent_slots": ["1","2"]}}
+    {chat_id: {"last_date": "YYYY-MM-DD", "sent_slots": ["1","2","TOP5"]}}
     """
     path = Path(BROADCAST_LOG_FILE)
     if not path.exists():
@@ -138,11 +181,12 @@ def save_broadcast_log(data: dict):
         logger.error("Failed to save broadcast log: %s", e)
 
 
-# ---------- История треков по пользователям (/today) ----------
-
+# =========================
+# History (/today random)
+# =========================
 def load_history():
     """
-    История: {chat_id: {last_date, track_id, used_track_ids: []}}
+    {chat_id: {last_date, track_id, used_track_ids: []}}
     """
     path = Path(HISTORY_FILE)
     if not path.exists():
@@ -162,15 +206,6 @@ def save_history(history: dict):
             json.dump(history, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error("Failed to save history: %s", e)
-
-
-def get_local_now():
-    return datetime.now(TIMEZONE)
-
-
-def is_window_open(now: datetime) -> bool:
-    # 08:00–10:00
-    return 8 <= now.hour < 10
 
 
 def choose_track_for_user(chat_id: int, today_date: str):
@@ -207,17 +242,66 @@ def choose_track_for_user(chat_id: int, today_date: str):
     return chosen
 
 
-# ---------- Клавиатуры ----------
+# =========================
+# Votes
+# =========================
+def load_votes():
+    """
+    {track_id: {"likes": int, "voters": [user_id,...]}}
+    """
+    path = Path(VOTES_FILE)
+    if not path.exists():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Failed to load votes: %s", e)
+        return {}
 
-def build_start_keyboard():
-    return ReplyKeyboardMarkup([[KeyboardButton("Подписаться")]], resize_keyboard=True)
+
+def save_votes(votes: dict):
+    path = Path(VOTES_FILE)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(votes, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Failed to save votes: %s", e)
 
 
-def build_main_keyboard():
-    keyboard = [
-        [KeyboardButton("🎵 Open today’s track")],
-        [KeyboardButton("🚫 Отписаться")],
-    ]
+# =========================
+# Subscribers
+# =========================
+def load_subscribers():
+    path = Path(SUBSCRIBERS_FILE)
+    if not path.exists():
+        return set()
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+            return set(map(int, data.get("chat_ids", [])))
+    except Exception as e:
+        logger.error("Failed to load subscribers: %s", e)
+        return set()
+
+
+def save_subscribers(chat_ids: set[int]):
+    path = Path(SUBSCRIBERS_FILE)
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump({"chat_ids": sorted(list(chat_ids))}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Failed to save subscribers: %s", e)
+
+
+# =========================
+# Keyboards
+# =========================
+def build_start_keyboard(subscribed: bool):
+    if subscribed:
+        keyboard = [[KeyboardButton("🎵 Open today’s track")]]
+    else:
+        keyboard = [[KeyboardButton("Подписаться")]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
@@ -227,25 +311,9 @@ def build_vote_inline_keyboard(track_id: str):
     )
 
 
-# ---------- Формат и отправка трека ----------
-
-def format_track_text(track: dict) -> str:
-    title_artist = (track.get("title_artist") or "").strip() or "(no title)"
-    video_link = (track.get("video_link") or "").strip()
-    message = (track.get("message") or "").strip()
-
-    msg_block = f"{message}\n\n" if message else ""
-    link_block = f"🔗 [Watch / Listen here]({video_link})\n\n" if video_link else ""
-
-    return (
-        "🎄 *Advent Music Calendar*\n\n"
-        f"🎵 *Track:*\n_{title_artist}_\n\n"
-        f"{msg_block}"
-        f"{link_block}"
-        "Если вам понравилось — нажмите ❤️"
-    )
-
-
+# =========================
+# Send track
+# =========================
 async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, track: dict):
     track_id = track.get("id", "")
     text = format_track_text(track)
@@ -259,7 +327,7 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
                 caption=text[:900],
                 parse_mode="Markdown",
                 reply_markup=build_vote_inline_keyboard(track_id),
-                disable_notification=True,   # без звука
+                disable_notification=True,  # тихо
             )
         else:
             await context.bot.send_message(
@@ -268,7 +336,7 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
                 parse_mode="Markdown",
                 reply_markup=build_vote_inline_keyboard(track_id),
                 disable_web_page_preview=False,
-                disable_notification=True,   # без звука
+                disable_notification=True,  # тихо
             )
     except Forbidden:
         subs = load_subscribers()
@@ -282,8 +350,9 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
         logger.error("Unexpected send error to %s: %s", chat_id, e)
 
 
-# ---------- Рассылка по слотам ----------
-
+# =========================
+# Broadcast jobs
+# =========================
 async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
     slot = str(context.job.data.get("slot"))
     now = get_local_now()
@@ -297,6 +366,7 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
 
     today_iso = today.isoformat()
     tracks = get_tracks_for_date_slot(today_iso, slot)
+
     if not tracks:
         logger.info("[BROADCAST] No tracks found | date=%s | slot=%s", today_iso, slot)
         return
@@ -308,7 +378,7 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(
         "[BROADCAST] Preparing send | date=%s | slot=%s | tracks=%d | subscribers=%d",
-        today_iso, slot, len(tracks), len(subs),
+        today_iso, slot, len(tracks), len(subs)
     )
 
     log = load_broadcast_log()
@@ -335,41 +405,240 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
 
     save_broadcast_log(log)
 
-    logger.info("[BROADCAST] Done | date=%s | slot=%s | sent_to=%d | skipped=%d", today_iso, slot, sent_chats, skipped_chats)
+    logger.info(
+        "[BROADCAST] Done | date=%s | slot=%s | sent_to=%d | skipped=%d",
+        today_iso, slot, sent_chats, skipped_chats
+    )
 
 
-# ---------- Голосование ----------
+def build_top5_text() -> str:
+    tracks = load_tracks()
+    track_by_id = {t["id"]: t for t in tracks}
+    votes = load_votes()
 
-def load_votes():
+    scored = []
+    for track_id, info in votes.items():
+        likes = int(info.get("likes", 0))
+        if likes <= 0:
+            continue
+        track = track_by_id.get(str(track_id))
+        if track:
+            scored.append((likes, track))
+
+    if not scored:
+        return "🏆 *Top 5 Advent Tracks*\n\nПока нет голосов ❤️"
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5]
+
+    lines = ["🏆 *Top 5 Advent Tracks (by likes)*", ""]
+    for i, (likes, t) in enumerate(top, start=1):
+        title = t.get("title_artist", "(no title)")
+        link = (t.get("video_link") or "").strip()
+        lines.append(f"{i}. *{title}* — {likes} ❤️")
+        if link:
+            lines.append(f"   🔗 {link}")
+
+    lines.append("\nСпасибо, что голосовали! 🎄")
+    return "\n".join(lines)
+
+
+async def broadcast_top5_to_all(context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> tuple[int, int]:
     """
-    {track_id: {"likes": int, "voters": [user_id, ...]}}
+    Возвращает (sent, skipped).
+    Если force=True — игнорируем защиту TOP5 в broadcast_log и шлём всем.
     """
-    path = Path(VOTES_FILE)
-    if not path.exists():
-        return {}
-    try:
-        with path.open(encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Failed to load votes: %s", e)
-        return {}
+    subs = load_subscribers()
+    if not subs:
+        logger.info("[TOP5] No subscribers")
+        return (0, 0)
+
+    text = build_top5_text()
+    log = load_broadcast_log()
+
+    today_iso = get_local_now().date().isoformat()
+
+    sent = 0
+    skipped = 0
+
+    for chat_id in list(subs):
+        key = str(chat_id)
+        entry = log.get(key, {"last_date": "", "sent_slots": []})
+
+        if entry.get("last_date") != today_iso:
+            entry = {"last_date": today_iso, "sent_slots": []}
+
+        if (not force) and ("TOP5" in entry.get("sent_slots", [])):
+            skipped += 1
+            continue
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+                disable_notification=True,
+                disable_web_page_preview=True,
+            )
+            if not force:
+                entry["sent_slots"].append("TOP5")
+                log[key] = entry
+            sent += 1
+        except Forbidden:
+            subs.discard(chat_id)
+            save_subscribers(subs)
+            logger.warning("[TOP5] Forbidden: removed chat %s", chat_id)
+        except Exception as e:
+            logger.error("[TOP5] Send error to %s: %s", chat_id, e)
+
+    if not force:
+        save_broadcast_log(log)
+
+    return (sent, skipped)
 
 
-def save_votes(votes: dict):
-    path = Path(VOTES_FILE)
-    try:
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(votes, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("Failed to save votes: %s", e)
+async def broadcast_top5_daily_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Запускается ежедневно в TOP5_SEND_TIME, но реально отправляет только 26 декабря.
+    Защита от повторов — broadcast_log.json, слот "TOP5".
+    """
+    now = get_local_now()
+    today = now.date()
+
+    if today != BROADCAST_END:
+        logger.info("[TOP5] Not the day | today=%s", today.isoformat())
+        return
+
+    logger.info("[TOP5] Daily job triggered | now=%s", now.strftime("%Y-%m-%d %H:%M:%S"))
+    sent, skipped = await broadcast_top5_to_all(context, force=False)
+    logger.info("[TOP5] Done | sent=%d | skipped=%d", sent, skipped)
+
+
+# =========================
+# Commands / handlers
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+    subscribed = chat_id in subs
+
+    if subscribed:
+        text = (
+            "✅ Вы уже подписаны!\n\n"
+            "Бот будет присылать вам треки по расписанию 🎶\n"
+            "А ещё вы можете открыть трек вручную утром через кнопку ниже."
+        )
+    else:
+        text = (
+            "🎄 *Advent Music Calendar*\n\n"
+            "Этот бот будет присылать вам *2–3 музыкальных трека каждый день* "
+            "с **16 по 26 декабря**.\n\n"
+            "В каждом сообщении вы получите:\n"
+            "• название трека\n"
+            "• ссылку на клип или аудио\n"
+            "• короткое сообщение\n\n"
+            "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇"
+        )
+
+    await update.message.reply_markdown(
+        text,
+        reply_markup=build_start_keyboard(subscribed=subscribed),
+    )
+
+
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+
+    if chat_id in subs:
+        await update.message.reply_text("✅ Вы уже подписаны.", reply_markup=build_start_keyboard(True))
+        return
+
+    subs.add(chat_id)
+    save_subscribers(subs)
+    logger.info("Subscribed chat_id=%s | total_subscribers=%d", chat_id, len(subs))
+
+    await update.message.reply_text(
+        "🎶 Подписка активирована!\n\n"
+        "С 16 по 26 декабря вы будете получать 2–3 трека в день. ✨",
+        reply_markup=build_start_keyboard(True),
+        disable_notification=True,
+    )
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+
+    if chat_id not in subs:
+        await update.message.reply_text("ℹ️ Вы не были подписаны.", reply_markup=build_start_keyboard(False))
+        return
+
+    subs.discard(chat_id)
+    save_subscribers(subs)
+    await update.message.reply_text(
+        "🧹 Подписка отключена.",
+        reply_markup=build_start_keyboard(False),
+        disable_notification=True,
+    )
+
+
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = get_local_now()
+    local_time_str = now.strftime("%H:%M")
+    today_date = now.date().isoformat()
+
+    if not is_window_open(now):
+        await update.message.reply_text(
+            f"The Advent window is closed now. ⏰\n\n"
+            f"You can open today’s track between 08:00 and 10:00.\n"
+            f"Current time: {local_time_str}.",
+            disable_notification=True,
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    track = choose_track_for_user(chat_id, today_date)
+
+    if track is None:
+        await update.message.reply_text(
+            "There are no tracks in the calendar yet. "
+            "Please ask the organizer to add some to tracks.csv. 🎧",
+            disable_notification=True,
+        )
+        return
+
+    track_id = track.get("id", "")
+    text = format_track_text(track)
+
+    await update.message.reply_markdown(
+        text,
+        reply_markup=build_vote_inline_keyboard(track_id),
+        disable_web_page_preview=False,
+    )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+
+    if text == "Подписаться":
+        return await subscribe(update, context)
+
+    if text == "🎵 Open today’s track":
+        return await today(update, context)
+
+    await update.message.reply_text(
+        "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄",
+        disable_notification=True,
+    )
 
 
 async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data or ""
-    await query.answer()
 
     if not data.startswith("VOTE:"):
+        await query.answer()
         return
 
     track_id = data.split(":", 1)[1]
@@ -393,117 +662,54 @@ async def vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Thank you for your vote! ❤️", show_alert=False)
 
 
-# ---------- Subscribers ----------
-
-def load_subscribers():
-    path = Path(SUBSCRIBERS_FILE)
-    if not path.exists():
-        return set()
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-            return set(map(int, data.get("chat_ids", [])))
-    except Exception as e:
-        logger.error("Failed to load subscribers: %s", e)
-        return set()
+async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = build_top5_text()
+    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
-def save_subscribers(chat_ids: set[int]):
-    path = Path(SUBSCRIBERS_FILE)
-    try:
-        with path.open("w", encoding="utf-8") as f:
-            json.dump({"chat_ids": sorted(list(chat_ids))}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("Failed to save subscribers: %s", e)
-
-
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subs = load_subscribers()
-
-    if chat_id in subs:
-        await update.message.reply_text("✅ Вы уже подписаны.", reply_markup=build_main_keyboard())
-        return
-
-    subs.add(chat_id)
-    save_subscribers(subs)
-
-    logger.info("Subscribed chat_id=%s | total_subscribers=%d", chat_id, len(subs))
-
-    await update.message.reply_text(
-        "🎶 Подписка активирована!\n\n"
-        "С 16 по 26 декабря вы будете получать 2–3 трека в день. ✨",
-        reply_markup=build_main_keyboard(),  # кнопка "Подписаться" пропадает
-    )
-
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subs = load_subscribers()
-
-    if chat_id not in subs:
-        await update.message.reply_text("ℹ️ Вы не были подписаны.", reply_markup=build_start_keyboard())
-        return
-
-    subs.discard(chat_id)
-    save_subscribers(subs)
-
-    await update.message.reply_text("🧹 Подписка отключена.", reply_markup=build_start_keyboard())
-
-
-# ---------- Admin: /setaudio ----------
-
-async def setaudio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def top5_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /top5_test — админ-команда, чтобы сейчас разослать TOP5 всем подписчикам.
+    (без записи в broadcast_log, чтобы не "сжечь" реальную рассылку 26-го)
+    """
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
-        await update.message.reply_text("You are not allowed to use /setaudio.")
+        await update.message.reply_text("You are not allowed to use /top5_test.")
         return
 
-    context.user_data["awaiting_audio"] = True
+    await update.message.reply_text("🚀 Sending TOP5 to all subscribers (test)...", disable_notification=True)
+    sent, skipped = await broadcast_top5_to_all(context, force=True)
     await update.message.reply_text(
-        "🎧 Send me the audio file now (as an Audio). "
-        "I’ll reply with its file_id for tracks.csv.\n\n"
-        "Tip: you can also send an audio with caption /setaudio."
+        f"✅ TOP5 test finished.\nSent: {sent}\nSkipped (not used in force mode): {skipped}",
+        disable_notification=True,
     )
 
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
+        await update.message.reply_text("You are not allowed to view stats.")
         return
 
-    msg = update.message
-    if msg is None or msg.audio is None:
+    tracks = load_tracks()
+    votes = load_votes()
+
+    if not tracks:
+        await update.message.reply_text("No tracks found in tracks.csv.")
         return
 
-    caption = (msg.caption or "").strip()
-    awaiting = context.user_data.get("awaiting_audio", False)
-    caption_mode = caption.startswith("/setaudio")
+    likes_by_id = {t["id"]: int(votes.get(t["id"], {}).get("likes", 0)) for t in tracks}
+    tracks_sorted = sorted(tracks, key=lambda t: likes_by_id.get(t["id"], 0), reverse=True)
 
-    if not (awaiting or caption_mode):
-        await msg.reply_text(
-            "If you want to save this audio’s file_id, send /setaudio first "
-            "or add caption /setaudio to the audio message."
-        )
-        return
+    lines = ["Advent Music – full stats:", ""]
+    for t in tracks_sorted:
+        tid = t.get("id", "")
+        ta = t.get("title_artist", "(no title)")
+        likes = likes_by_id.get(tid, 0)
+        lines.append(f"{tid}. {ta}  ({likes} ❤️)")
 
-    audio = msg.audio
-    file_id = audio.file_id
-    unique_id = audio.file_unique_id
+    await update.message.reply_text("\n".join(lines))
 
-    context.user_data["awaiting_audio"] = False
-
-    logger.info("Admin uploaded audio. file_id=%s unique_id=%s", file_id, unique_id)
-
-    await msg.reply_text(
-        "✅ Audio saved.\n\n"
-        f"file_id:\n{file_id}\n\n"
-        f"(debug) file_unique_id: {unique_id}\n\n"
-        "👉 Put this file_id into tracks.csv column `audio`."
-    )
-
-
-# ---------- Admin: /subscribers, /backup, /restore ----------
 
 async def subscribers_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -534,12 +740,12 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not p.exists():
             await update.message.reply_text(f"⚠️ {name} not found.")
             continue
-
         try:
             await update.message.reply_document(
                 document=p,
                 filename=name,
                 caption=f"📦 Backup: {name}",
+                disable_notification=True,
             )
             sent_any = True
         except Exception as e:
@@ -547,7 +753,7 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Failed to send {name}")
 
     if sent_any:
-        await update.message.reply_text("✅ Backup completed.")
+        await update.message.reply_text("✅ Backup completed.", disable_notification=True)
 
 
 async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -563,7 +769,8 @@ async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• subscribers.json\n"
         "• votes.json\n"
         "• broadcast_log.json\n\n"
-        "I will restore it immediately."
+        "I will restore it immediately.",
+        disable_notification=True,
     )
 
 
@@ -575,13 +782,11 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not context.user_data.get("awaiting_restore"):
         return
 
-    msg = update.message
-    if msg is None or msg.document is None:
+    doc = update.message.document
+    if doc is None:
         return
 
-    doc = msg.document
     filename = doc.file_name
-
     allowed = {
         "subscribers.json": SUBSCRIBERS_FILE,
         "votes.json": VOTES_FILE,
@@ -589,12 +794,13 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
 
     if filename not in allowed:
-        await msg.reply_text(
+        await update.message.reply_text(
             "❌ Unsupported file.\n"
             "Allowed files:\n"
             "• subscribers.json\n"
             "• votes.json\n"
-            "• broadcast_log.json"
+            "• broadcast_log.json",
+            disable_notification=True,
         )
         return
 
@@ -604,7 +810,7 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         data = json.loads(content.decode("utf-8"))
     except Exception:
-        await msg.reply_text("❌ Invalid JSON file.")
+        await update.message.reply_text("❌ Invalid JSON file.", disable_notification=True)
         return
 
     path = Path(allowed[filename])
@@ -613,239 +819,20 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error("Restore failed for %s: %s", filename, e)
-        await msg.reply_text("❌ Failed to write file.")
+        await update.message.reply_text("❌ Failed to write file.", disable_notification=True)
         return
 
     context.user_data["awaiting_restore"] = False
-    await msg.reply_text(f"✅ Restored `{filename}` successfully.", parse_mode="Markdown")
-
-
-# ---------- Handlers: /start, /today, /top5, /stats ----------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subs = load_subscribers()
-
-    text = (
-        "🎄 *Advent Music Calendar*\n\n"
-        "Этот бот будет присылать вам *2–3 музыкальных трека каждый день* "
-        "с **16 по 26 декабря**.\n\n"
-        "В каждом сообщении вы получите:\n"
-        "• название трека\n"
-        "• ссылку на клип или аудио\n"
-        "• короткое сообщение\n\n"
-    )
-
-    if chat_id in subs:
-        await update.message.reply_markdown(
-            "✅ Вы уже подписаны!\n\n" + text + "Используйте меню ниже 👇",
-            reply_markup=build_main_keyboard(),
-        )
-    else:
-        await update.message.reply_markdown(
-            text + "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇",
-            reply_markup=build_start_keyboard(),
-        )
-
-
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = get_local_now()
-    local_time_str = now.strftime("%H:%M")
-    today_date = now.date().isoformat()
-
-    if not is_window_open(now):
-        await update.message.reply_text(
-            f"The Advent window is closed now. ⏰\n\n"
-            f"You can open today’s track between 08:00 and 10:00.\n"
-            f"Current time: {local_time_str}."
-        )
-        return
-
-    chat_id = update.effective_chat.id
-    track = choose_track_for_user(chat_id, today_date)
-
-    if track is None:
-        await update.message.reply_text(
-            "There are no tracks in the calendar yet. "
-            "Please ask the organizer to add some to tracks.csv. 🎧"
-        )
-        return
-
-    track_id = track.get("id", "")
-    text = format_track_text(track)
-
-    audio_file_id = (track.get("audio") or "").strip()
-
-    if audio_file_id:
-        await update.message.reply_audio(
-            audio=audio_file_id,
-            caption=text[:900],
-            parse_mode="Markdown",
-            reply_markup=build_vote_inline_keyboard(track_id),
-            disable_notification=True,
-        )
-    else:
-        await update.message.reply_markdown(
-            text,
-            reply_markup=build_vote_inline_keyboard(track_id),
-            disable_web_page_preview=False,
-        )
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if text == "Подписаться":
-        return await subscribe(update, context)
-
-    if text == "🚫 Отписаться":
-        return await unsubscribe(update, context)
-
-    if text == "🎵 Open today’s track":
-        return await today(update, context)
-
     await update.message.reply_text(
-        "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄",
-        reply_markup=build_main_keyboard(),
+        f"✅ Restored `{filename}` successfully.",
+        parse_mode="Markdown",
+        disable_notification=True,
     )
 
 
-async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tracks = load_tracks()
-    track_by_id = {t["id"]: t for t in tracks}
-    votes = load_votes()
-
-    if not votes:
-        await update.message.reply_text("No votes yet. Nobody tapped ❤️ so far. 😊")
-        return
-
-    scored = []
-    for track_id, info in votes.items():
-        likes = int(info.get("likes", 0))
-        if likes <= 0:
-            continue
-        track = track_by_id.get(track_id)
-        if not track:
-            continue
-        scored.append((likes, track))
-
-    if not scored:
-        await update.message.reply_text("No tracks with likes yet.")
-        return
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:5]
-
-    lines = ["🏆 Top 5 Advent Tracks (by likes):", ""]
-    for i, (likes, t) in enumerate(top, start=1):
-        lines.append(f"{i}. {t.get('title_artist','(no title)')}  ({likes} ❤️)")
-        if t.get("video_link"):
-            lines.append(f"   {t['video_link']}")
-
-    await update.message.reply_text("\n".join(lines))
-
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user is None or user.id != ADMIN_USER_ID:
-        await update.message.reply_text("You are not allowed to view stats.")
-        return
-
-    tracks = load_tracks()
-    votes = load_votes()
-
-    if not tracks:
-        await update.message.reply_text("No tracks found in tracks.csv.")
-        return
-
-    likes_by_id = {t["id"]: int(votes.get(t["id"], {}).get("likes", 0)) for t in tracks}
-    tracks_sorted = sorted(tracks, key=lambda t: likes_by_id.get(t["id"], 0), reverse=True)
-
-    lines = ["📊 Advent Music – full stats:", ""]
-    for t in tracks_sorted:
-        tid = t.get("id", "")
-        ta = t.get("title_artist", "(no title)")
-        likes = likes_by_id.get(tid, 0)
-        lines.append(f"{tid}. {ta}  ({likes} ❤️)")
-
-    await update.message.reply_text("\n".join(lines))
-
-
-# ---------- Admin: /broadcast_test ----------
-
-async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Админ-команда для тестовой отправки ТОЛЬКО в текущий чат.
-
-    Использование:
-      /broadcast_test              -> сегодня, slot 1
-      /broadcast_test 2            -> сегодня, slot 2
-      /broadcast_test all          -> сегодня, slot 1+2+3
-      /broadcast_test 2025-12-16 1
-      /broadcast_test 2025-12-16 all
-    """
-    user = update.effective_user
-    if user is None or user.id != ADMIN_USER_ID:
-        await update.message.reply_text("You are not allowed to use /broadcast_test.")
-        return
-
-    chat_id = update.effective_chat.id
-    args = context.args or []
-
-    now = get_local_now()
-    day_iso = now.date().isoformat()
-    slot_arg = "1"
-
-    if len(args) == 1:
-        if args[0].lower() in ("1", "2", "3", "all"):
-            slot_arg = args[0].lower()
-        else:
-            day_iso = args[0]
-    elif len(args) >= 2:
-        day_iso = args[0]
-        slot_arg = args[1].lower()
-
-    if slot_arg not in ("1", "2", "3", "all"):
-        await update.message.reply_text(
-            "Usage:\n"
-            "/broadcast_test\n"
-            "/broadcast_test 2\n"
-            "/broadcast_test all\n"
-            "/broadcast_test YYYY-MM-DD 1|2|3|all"
-        )
-        return
-
-    slots = ["1", "2", "3"] if slot_arg == "all" else [slot_arg]
-
-    sent = 0
-    missing = []
-
-    for slot in slots:
-        tracks = get_tracks_for_date_slot(day_iso, slot)
-        if not tracks:
-            missing.append(slot)
-            continue
-
-        for t in tracks:
-            await send_track_to_chat(context, chat_id, t)
-            sent += 1
-
-    text = (
-        "✅ Broadcast test finished\n\n"
-        f"Chat ID: {chat_id}\n"
-        f"Date: {day_iso}\n"
-        f"Slots: {', '.join(slots)}\n"
-        f"Messages sent: {sent}"
-    )
-
-    if missing:
-        text += f"\n⚠️ No tracks for slot(s): {', '.join(missing)}"
-
-    await update.message.reply_text(text)
-
-
-# ---------- Main ----------
-
+# =========================
+# Main
+# =========================
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -854,12 +841,6 @@ def main():
     application = ApplicationBuilder().token(token).build()
 
     # --- Scheduled broadcasts (16–26 Dec, slots 1–3) ---
-    # Важно: JobQueue должен быть доступен (install python-telegram-bot[job-queue])
-    if application.job_queue is None:
-        raise RuntimeError(
-            "JobQueue is not available. Install PTB with: pip install 'python-telegram-bot[job-queue]'"
-        )
-
     for slot, t in SLOT_SEND_TIMES.items():
         application.job_queue.run_daily(
             broadcast_slot_job,
@@ -869,28 +850,36 @@ def main():
             name=f"broadcast_slot_{slot}",
         )
 
+    # --- TOP5 daily job at 20:00 with date check (robust to redeploys) ---
+    application.job_queue.run_daily(
+        broadcast_top5_daily_job,
+        time=TOP5_SEND_TIME,
+        days=(0, 1, 2, 3, 4, 5, 6),
+        name="broadcast_top5_daily",
+    )
+
+    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
 
     application.add_handler(CommandHandler("today", today))
     application.add_handler(CommandHandler("top5", top5))
-    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("top5_test", top5_test))
 
+    application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("subscribe", subscribe))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe))
-
-    application.add_handler(CommandHandler("setaudio", setaudio))
-    application.add_handler(CommandHandler("broadcast_test", broadcast_test))
-
     application.add_handler(CommandHandler("subscribers", subscribers_count))
     application.add_handler(CommandHandler("backup", backup))
     application.add_handler(CommandHandler("restore", restore))
 
-    # audio/doc/text handlers
-    application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+    # Restore file handler (admin uploads json)
     application.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
+
+    # Text buttons
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # Votes
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
 
     application.run_polling()
