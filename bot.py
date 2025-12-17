@@ -150,7 +150,7 @@ def format_track_text(track: dict) -> str:
         f"🎵 *Track:*\n_{title_artist}_\n\n"
         f"{msg_block}"
         f"{link_block}"
-        "Если вам понравилось — нажмите ❤️"
+        "Если вам понравился трек — нажмите ❤️"
     )
 
 
@@ -299,7 +299,7 @@ def save_subscribers(chat_ids: set[int]):
 # =========================
 def build_start_keyboard(subscribed: bool):
     if subscribed:
-        keyboard = [[KeyboardButton("🎵 Open today’s track")]]
+        keyboard = [[KeyboardButton("🎵 Open today’s tracks")]]
     else:
         keyboard = [[KeyboardButton("Подписаться")]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -587,6 +587,14 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     local_time_str = now.strftime("%H:%M")
     today_iso = now.date().isoformat()
 
+    if not is_window_open(now):
+        await update.message.reply_text(
+            f"The Advent window is closed now. ⏰\n\n"
+            f"You can open today’s track between 08:00 and 10:00.\n"
+            f"Current time: {local_time_str}."
+        )
+        return
+
     tracks_today = get_tracks_for_date(today_iso)
     if not tracks_today:
         await update.message.reply_text(
@@ -616,6 +624,14 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     local_time_str = now.strftime("%H:%M")
     today_iso = now.date().isoformat()
 
+    if not is_window_open(now):
+        await update.message.reply_text(
+            f"The Advent window is closed now. ⏰\n\n"
+            f"You can open today’s track between 08:00 and 10:00.\n"
+            f"Current time: {local_time_str}."
+        )
+        return
+
     tracks_today = get_tracks_for_date(today_iso)
     if not tracks_today:
         await update.message.reply_text(
@@ -635,7 +651,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Подписаться":
         return await subscribe(update, context)
 
-    if text == "🎵 Open today’s tracks":
+    if text == "🎵 Open today’s track":
         return await today(update, context)
 
     await update.message.reply_text(
