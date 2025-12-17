@@ -1,22 +1,22 @@
 import os
 import logging
-import pytz
 import csv
 import json
-from pathlib import Path
 import random
+from pathlib import Path
 from datetime import datetime, time, date
+from zoneinfo import ZoneInfo
+
 from telegram.error import Forbidden, BadRequest
-
-
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     KeyboardButton,
-    Message,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -32,22 +32,19 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-# 🔒 Не логируем HTTP-запросы с токеном
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-
-from zoneinfo import ZoneInfo
+# --- Timezone ---
 TIMEZONE = ZoneInfo("Asia/Tbilisi")
 
 BROADCAST_START = date(2025, 12, 16)
 BROADCAST_END = date(2025, 12, 26)
 
 # Во сколько отправлять slot 1/2/3 (Asia/Tbilisi)
-
 SLOT_SEND_TIMES = {
     "1": time(8, 35, tzinfo=TIMEZONE),
-    "2": time(13, 15, tzinfo=TIMEZONE),
-    "3": time(16, 0, tzinfo=TIMEZONE),
+    "2": time(12, 15, tzinfo=TIMEZONE),
+    "3": time(13, 15, tzinfo=TIMEZONE),
 }
 
 BROADCAST_LOG_FILE = "broadcast_log.json"
@@ -91,12 +88,11 @@ def load_tracks():
 
             tracks.append({
                 "id": str(row.get("id", "")).strip(),
-                "date": (row.get("date") or "").strip(),
-                "slot": (row.get("slot") or "").strip(),
-                # В CSV колонка называется "title&artist", в коде используем удобное имя
+                "date": (row.get("date") or "").strip(),   # YYYY-MM-DD
+                "slot": (row.get("slot") or "").strip(),   # "1"/"2"/"3"
                 "title_artist": (row.get("title&artist") or "").strip(),
                 "video_link": (row.get("video_link") or "").strip(),
-                "audio": (row.get("audio") or "").strip(),
+                "audio": (row.get("audio") or "").strip(),  # file_id
                 "message": (row.get("message") or "").strip(),
             })
 
@@ -105,7 +101,18 @@ def load_tracks():
     return TRACKS_CACHE
 
 
-# ---------- История треков по пользователям (/today) ----------
+def get_tracks_for_date_slot(day_iso: str, slot: str) -> list[dict]:
+    tracks = load_tracks()
+    out = []
+    for t in tracks:
+        if (t.get("date") == day_iso) and (str(t.get("slot")) == str(slot)):
+            if (t.get("title_artist") or "").strip() or (t.get("video_link") or "").strip() or (t.get("audio") or "").strip():
+                out.append(t)
+    out.sort(key=lambda x: int(x.get("id") or 0))
+    return out
+
+
+# ---------- Логи рассылки ----------
 
 def load_broadcast_log():
     """
@@ -131,6 +138,7 @@ def save_broadcast_log(data: dict):
         logger.error("Failed to save broadcast log: %s", e)
 
 
+# ---------- История треков по пользователям (/today) ----------
 
 def load_history():
     """
@@ -161,22 +169,11 @@ def get_local_now():
 
 
 def is_window_open(now: datetime) -> bool:
-    """
-    Открыто ли «окошко» 08:00–10:00 (по TIMEZONE).
-    08:00 включительно, 10:00 не включительно.
-    """
+    # 08:00–10:00
     return 8 <= now.hour < 10
 
 
 def choose_track_for_user(chat_id: int, today_date: str):
-    """
-    Выбор трека для конкретного чата/пользователя на сегодня.
-
-    Логика:
-    - если уже выдавали трек сегодня -> вернуть тот же;
-    - иначе выбрать случайный из тех, что ещё НЕ были у пользователя;
-    - если все уже были, начать новый круг со всех треков.
-    """
     tracks = load_tracks()
     if not tracks:
         return None
@@ -209,18 +206,28 @@ def choose_track_for_user(chat_id: int, today_date: str):
     save_history(history)
     return chosen
 
-def get_tracks_for_date_slot(day_iso: str, slot: str) -> list[dict]:
-    tracks = load_tracks()
-    out = []
-    for t in tracks:
-        if (t.get("date") == day_iso) and (str(t.get("slot")) == str(slot)):
-            # не шлём пустые строки
-            if (t.get("title_artist") or "").strip() or (t.get("video_link") or "").strip() or (t.get("audio") or "").strip():
-                out.append(t)
-    # на всякий случай сортировка по id
-    out.sort(key=lambda x: int(x.get("id") or 0))
-    return out
 
+# ---------- Клавиатуры ----------
+
+def build_start_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("Подписаться")]], resize_keyboard=True)
+
+
+def build_main_keyboard():
+    keyboard = [
+        [KeyboardButton("🎵 Open today’s track")],
+        [KeyboardButton("🚫 Отписаться")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def build_vote_inline_keyboard(track_id: str):
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❤️ I like this track", callback_data=f"VOTE:{track_id}")]]
+    )
+
+
+# ---------- Формат и отправка трека ----------
 
 def format_track_text(track: dict) -> str:
     title_artist = (track.get("title_artist") or "").strip() or "(no title)"
@@ -246,14 +253,13 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
 
     try:
         if audio_file_id:
-            # caption у аудио ограничен по длине — держим компактным
             await context.bot.send_audio(
                 chat_id=chat_id,
                 audio=audio_file_id,
                 caption=text[:900],
                 parse_mode="Markdown",
                 reply_markup=build_vote_inline_keyboard(track_id),
-                disable_notification=True,
+                disable_notification=True,   # без звука
             )
         else:
             await context.bot.send_message(
@@ -262,10 +268,9 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
                 parse_mode="Markdown",
                 reply_markup=build_vote_inline_keyboard(track_id),
                 disable_web_page_preview=False,
-                disable_notification=True,
+                disable_notification=True,   # без звука
             )
     except Forbidden:
-        # бот больше не может писать в чат — удаляем из подписчиков
         subs = load_subscribers()
         if chat_id in subs:
             subs.discard(chat_id)
@@ -276,52 +281,34 @@ async def send_track_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, t
     except Exception as e:
         logger.error("Unexpected send error to %s: %s", chat_id, e)
 
+
+# ---------- Рассылка по слотам ----------
+
 async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
     slot = str(context.job.data.get("slot"))
     now = get_local_now()
     today = now.date()
 
-    logger.info(
-        "[BROADCAST] Job started | slot=%s | now=%s",
-        slot,
-        now.strftime("%Y-%m-%d %H:%M:%S"),
-    )
+    logger.info("[BROADCAST] Job started | slot=%s | now=%s", slot, now.strftime("%Y-%m-%d %H:%M:%S"))
 
     if today < BROADCAST_START or today > BROADCAST_END:
-        logger.info(
-            "[BROADCAST] Outside date range | today=%s",
-            today.isoformat(),
-        )
+        logger.info("[BROADCAST] Outside date range | today=%s", today.isoformat())
         return
 
     today_iso = today.isoformat()
     tracks = get_tracks_for_date_slot(today_iso, slot)
-
     if not tracks:
-        logger.info(
-            "[BROADCAST] No tracks found | date=%s | slot=%s",
-            today_iso,
-            slot,
-        )
+        logger.info("[BROADCAST] No tracks found | date=%s | slot=%s", today_iso, slot)
         return
 
     subs = load_subscribers()
-    subs_count = len(subs)
-
     if not subs:
-        logger.info(
-            "[BROADCAST] No subscribers | date=%s | slot=%s",
-            today_iso,
-            slot,
-        )
+        logger.info("[BROADCAST] No subscribers | date=%s | slot=%s", today_iso, slot)
         return
 
     logger.info(
         "[BROADCAST] Preparing send | date=%s | slot=%s | tracks=%d | subscribers=%d",
-        today_iso,
-        slot,
-        len(tracks),
-        subs_count,
+        today_iso, slot, len(tracks), len(subs),
     )
 
     log = load_broadcast_log()
@@ -348,43 +335,14 @@ async def broadcast_slot_job(context: ContextTypes.DEFAULT_TYPE):
 
     save_broadcast_log(log)
 
-    logger.info(
-        "[BROADCAST] Done | date=%s | slot=%s | sent_to=%d | skipped=%d",
-        today_iso,
-        slot,
-        sent_chats,
-        skipped_chats,
-    )
-
-
-
-# ---------- Клавиатуры ----------
-
-def build_main_keyboard():
-    keyboard = [
-        [KeyboardButton("🎵 Open today’s track")],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-
-def build_start_keyboard():
-    keyboard = [
-        [KeyboardButton("Подписаться")],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-
-def build_vote_inline_keyboard(track_id: str):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("❤️ I like this track", callback_data=f"VOTE:{track_id}")]]
-    )
+    logger.info("[BROADCAST] Done | date=%s | slot=%s | sent_to=%d | skipped=%d", today_iso, slot, sent_chats, skipped_chats)
 
 
 # ---------- Голосование ----------
 
 def load_votes():
     """
-    Структура: {track_id: {"likes": int, "voters": [user_id, ...]}}
+    {track_id: {"likes": int, "voters": [user_id, ...]}}
     """
     path = Path(VOTES_FILE)
     if not path.exists():
@@ -464,7 +422,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = load_subscribers()
 
     if chat_id in subs:
-        await update.message.reply_text("✅ Вы уже подписаны.")
+        await update.message.reply_text("✅ Вы уже подписаны.", reply_markup=build_main_keyboard())
         return
 
     subs.add(chat_id)
@@ -474,7 +432,8 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎶 Подписка активирована!\n\n"
-        "С 16 по 26 декабря вы будете получать 2–3 трека в день. ✨"
+        "С 16 по 26 декабря вы будете получать 2–3 трека в день. ✨",
+        reply_markup=build_main_keyboard(),  # кнопка "Подписаться" пропадает
     )
 
 
@@ -483,12 +442,13 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = load_subscribers()
 
     if chat_id not in subs:
-        await update.message.reply_text("ℹ️ Вы не были подписаны.")
+        await update.message.reply_text("ℹ️ Вы не были подписаны.", reply_markup=build_start_keyboard())
         return
 
     subs.discard(chat_id)
     save_subscribers(subs)
-    await update.message.reply_text("🧹 Подписка отключена.")
+
+    await update.message.reply_text("🧹 Подписка отключена.", reply_markup=build_start_keyboard())
 
 
 # ---------- Admin: /setaudio ----------
@@ -542,6 +502,9 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 Put this file_id into tracks.csv column `audio`."
     )
 
+
+# ---------- Admin: /subscribers, /backup, /restore ----------
+
 async def subscribers_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
@@ -549,9 +512,8 @@ async def subscribers_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     subs = load_subscribers()
-    await update.message.reply_text(
-        f"👥 Подписчиков: {len(subs)}"
-    )
+    await update.message.reply_text(f"👥 Подписчиков: {len(subs)}")
+
 
 async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -587,6 +549,7 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sent_any:
         await update.message.reply_text("✅ Backup completed.")
 
+
 async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user is None or user.id != ADMIN_USER_ID:
@@ -594,7 +557,6 @@ async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["awaiting_restore"] = True
-
     await update.message.reply_text(
         "♻️ Restore mode enabled.\n\n"
         "Please send ONE of the following JSON files:\n"
@@ -605,9 +567,65 @@ async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------- Handlers ----------
+async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user is None or user.id != ADMIN_USER_ID:
+        return
+
+    if not context.user_data.get("awaiting_restore"):
+        return
+
+    msg = update.message
+    if msg is None or msg.document is None:
+        return
+
+    doc = msg.document
+    filename = doc.file_name
+
+    allowed = {
+        "subscribers.json": SUBSCRIBERS_FILE,
+        "votes.json": VOTES_FILE,
+        "broadcast_log.json": BROADCAST_LOG_FILE,
+    }
+
+    if filename not in allowed:
+        await msg.reply_text(
+            "❌ Unsupported file.\n"
+            "Allowed files:\n"
+            "• subscribers.json\n"
+            "• votes.json\n"
+            "• broadcast_log.json"
+        )
+        return
+
+    file = await doc.get_file()
+    content = await file.download_as_bytearray()
+
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except Exception:
+        await msg.reply_text("❌ Invalid JSON file.")
+        return
+
+    path = Path(allowed[filename])
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("Restore failed for %s: %s", filename, e)
+        await msg.reply_text("❌ Failed to write file.")
+        return
+
+    context.user_data["awaiting_restore"] = False
+    await msg.reply_text(f"✅ Restored `{filename}` successfully.", parse_mode="Markdown")
+
+
+# ---------- Handlers: /start, /today, /top5, /stats ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = load_subscribers()
+
     text = (
         "🎄 *Advent Music Calendar*\n\n"
         "Этот бот будет присылать вам *2–3 музыкальных трека каждый день* "
@@ -616,13 +634,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• название трека\n"
         "• ссылку на клип или аудио\n"
         "• короткое сообщение\n\n"
-        "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇"
     )
 
-    await update.message.reply_markdown(
-        text,
-        reply_markup=build_start_keyboard(),
-    )
+    if chat_id in subs:
+        await update.message.reply_markdown(
+            "✅ Вы уже подписаны!\n\n" + text + "Используйте меню ниже 👇",
+            reply_markup=build_main_keyboard(),
+        )
+    else:
+        await update.message.reply_markdown(
+            text + "Чтобы получать ежедневные треки, нажмите кнопку ниже 👇",
+            reply_markup=build_start_keyboard(),
+        )
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -648,30 +671,25 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    title_artist = track.get("title_artist", "").strip() or "(no title)"
-    video_link = track.get("video_link", "").strip()
-    message = track.get("message", "").strip()
     track_id = track.get("id", "")
+    text = format_track_text(track)
 
-    logger.info("Chat %s opened track %s for %s", chat_id, track_id, today_date)
+    audio_file_id = (track.get("audio") or "").strip()
 
-    msg_block = (message + "\n\n") if message else ""
-    link_block = f"🔗 [Watch / Listen here]({video_link})" if video_link else "🔗 (no link)"
-
-    text = (
-        f"✨ Advent Music Calendar\n\n"
-        f"🎵 *Track of the day:*\n"
-        f"_{title_artist}_\n\n"
-        f"{msg_block}"
-        f"{link_block}\n\n"
-        f"If you liked this track, tap ❤️ below!"
-    )
-
-    await update.message.reply_markdown(
-        text,
-        reply_markup=build_vote_inline_keyboard(track_id),
-        disable_web_page_preview=False,
-    )
+    if audio_file_id:
+        await update.message.reply_audio(
+            audio=audio_file_id,
+            caption=text[:900],
+            parse_mode="Markdown",
+            reply_markup=build_vote_inline_keyboard(track_id),
+            disable_notification=True,
+        )
+    else:
+        await update.message.reply_markdown(
+            text,
+            reply_markup=build_vote_inline_keyboard(track_id),
+            disable_web_page_preview=False,
+        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -680,8 +698,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Подписаться":
         return await subscribe(update, context)
 
+    if text == "🚫 Отписаться":
+        return await unsubscribe(update, context)
+
+    if text == "🎵 Open today’s track":
+        return await today(update, context)
+
     await update.message.reply_text(
-        "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄"
+        "Используйте кнопки ниже, чтобы работать с Advent Music Calendar 🎄",
+        reply_markup=build_main_keyboard(),
     )
 
 
@@ -722,9 +747,6 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    logger.info("User id: %s", user.id if user else None)
-    logger.info("ADMIN_USER_ID: %s", ADMIN_USER_ID)
-
     if user is None or user.id != ADMIN_USER_ID:
         await update.message.reply_text("You are not allowed to view stats.")
         return
@@ -748,62 +770,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines))
 
-async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user is None or user.id != ADMIN_USER_ID:
-        return
 
-    if not context.user_data.get("awaiting_restore"):
-        return
-
-    doc = update.message.document
-    if doc is None:
-        return
-
-    filename = doc.file_name
-    allowed = {
-        "subscribers.json": SUBSCRIBERS_FILE,
-        "votes.json": VOTES_FILE,
-        "broadcast_log.json": BROADCAST_LOG_FILE,
-    }
-
-    if filename not in allowed:
-        await update.message.reply_text(
-            "❌ Unsupported file.\n"
-            "Allowed files:\n"
-            "• subscribers.json\n"
-            "• votes.json\n"
-            "• broadcast_log.json"
-        )
-        return
-
-    # Скачиваем файл
-    file = await doc.get_file()
-    content = await file.download_as_bytearray()
-
-    try:
-        data = json.loads(content.decode("utf-8"))
-    except Exception:
-        await update.message.reply_text("❌ Invalid JSON file.")
-        return
-
-    # Записываем файл
-    path = Path(allowed[filename])
-    try:
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("Restore failed for %s: %s", filename, e)
-        await update.message.reply_text("❌ Failed to write file.")
-        return
-
-    context.user_data["awaiting_restore"] = False
-
-    await update.message.reply_text(
-        f"✅ Restored `{filename}` successfully.",
-        parse_mode="Markdown",
-    )
-
+# ---------- Admin: /broadcast_test ----------
 
 async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -828,7 +796,6 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day_iso = now.date().isoformat()
     slot_arg = "1"
 
-    # --- парсинг аргументов ---
     if len(args) == 1:
         if args[0].lower() in ("1", "2", "3", "all"):
             slot_arg = args[0].lower()
@@ -863,15 +830,6 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_track_to_chat(context, chat_id, t)
             sent += 1
 
-    logger.info(
-        "[BROADCAST_TEST] chat_id=%s | date=%s | slots=%s | sent=%d",
-        chat_id,
-        day_iso,
-        ",".join(slots),
-        sent,
-    )
-
-    # --- ответ админу ---
     text = (
         "✅ Broadcast test finished\n\n"
         f"Chat ID: {chat_id}\n"
@@ -886,7 +844,6 @@ async def broadcast_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-
 # ---------- Main ----------
 
 def main():
@@ -894,11 +851,15 @@ def main():
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it as an environment variable.")
 
-    logger.info("TOKEN hash prefix: %s", hash(token) % 100000)
-
     application = ApplicationBuilder().token(token).build()
 
     # --- Scheduled broadcasts (16–26 Dec, slots 1–3) ---
+    # Важно: JobQueue должен быть доступен (install python-telegram-bot[job-queue])
+    if application.job_queue is None:
+        raise RuntimeError(
+            "JobQueue is not available. Install PTB with: pip install 'python-telegram-bot[job-queue]'"
+        )
+
     for slot, t in SLOT_SEND_TIMES.items():
         application.job_queue.run_daily(
             broadcast_slot_job,
@@ -907,7 +868,6 @@ def main():
             data={"slot": slot},
             name=f"broadcast_slot_{slot}",
         )
-
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
@@ -922,18 +882,18 @@ def main():
     application.add_handler(CommandHandler("setaudio", setaudio))
     application.add_handler(CommandHandler("broadcast_test", broadcast_test))
 
-    # Important: audio handler before text handler
+    application.add_handler(CommandHandler("subscribers", subscribers_count))
+    application.add_handler(CommandHandler("backup", backup))
+    application.add_handler(CommandHandler("restore", restore))
+
+    # audio/doc/text handlers
     application.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     application.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^VOTE:"))
-    application.add_handler(CommandHandler("subscribers", subscribers_count))
-    application.add_handler(CommandHandler("backup", backup))
-    application.add_handler(CommandHandler("restore", restore))
 
     application.run_polling()
-
 
 
 if __name__ == "__main__":
