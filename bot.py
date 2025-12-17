@@ -651,7 +651,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Подписаться":
         return await subscribe(update, context)
 
-    if text == "🎵 Open today’s track":
+    if text == "🎵 Open today’s tracks":
         return await today(update, context)
 
     await update.message.reply_text(
